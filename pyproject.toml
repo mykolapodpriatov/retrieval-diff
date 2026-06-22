@@ -1,0 +1,139 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "retrieval-diff"
+version = "0.1.0"
+description = "A git-style diff for RAG retrievers: snapshot, diff, attribute, and gate CI on retrieval regressions."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "Mykola Podpriatov", email = "nsplotos@gmail.com" }]
+keywords = [
+    "rag",
+    "retrieval",
+    "diff",
+    "embeddings",
+    "vector-search",
+    "regression-testing",
+    "ci",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=1.24",
+    "rank_bm25>=0.2.2",
+    "typer>=0.12",
+    "rich>=13.0",
+    "pydantic>=2.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/mykolapodpriatov/retrieval-diff"
+Repository = "https://github.com/mykolapodpriatov/retrieval-diff"
+Issues = "https://github.com/mykolapodpriatov/retrieval-diff/issues"
+
+[project.optional-dependencies]
+faiss = ["faiss-cpu>=1.7"]
+chroma = ["chromadb>=0.5"]
+qdrant = ["qdrant-client>=1.9"]
+pg = ["psycopg[binary]>=3.1", "pgvector>=0.2"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+retrieval-diff = "retrieval_diff.cli:app"
+
+[project.entry-points.pytest11]
+retrieval_diff = "retrieval_diff.pytest_plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/retrieval_diff"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "B008", # function calls in argument defaults (typer.Option idiom)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+plugins = ["pydantic.mypy"]
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+
+[[tool.mypy.overrides]]
+module = ["rank_bm25.*"]
+ignore_missing_imports = true
+
+# numpy ships stubs that use `type X = ...` (PEP 695) syntax, which mypy rejects
+# under python_version = "3.11"; skip following them so our 3.11 target is honored
+# while still validating cleanly on 3.13. numpy is only used at the boundary.
+[[tool.mypy.overrides]]
+module = ["numpy"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra"
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["retrieval_diff"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]

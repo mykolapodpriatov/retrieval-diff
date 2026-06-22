@@ -1,0 +1,14 @@
+# Minimal project config for the offline retrieval-diff demo.
+# In a real project these keys live in your repository's pyproject.toml.
+
+[tool.retrieval_diff]
+hook = "rdiff_hook.py"
+queries = "queries.jsonl"
+k = 4
+
+[tool.retrieval_diff.budget]
+removed_golden_fails = true
+max_golden_rank_drop = 1
+max_churn = 0.4
+allow_new_chunks = true
+query_set_change_fails = true

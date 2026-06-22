@@ -1,0 +1,64 @@
+name: "retrieval-diff check"
+description: >-
+  Run retrieval-diff against a committed retrieval.lock and fail the build on a
+  retrieval regression. Optionally posts the Markdown diff as a PR comment.
+author: "Mykola Podpriatov"
+branding:
+  icon: "git-commit"
+  color: "purple"
+
+inputs:
+  lock:
+    description: "Path to the committed retrieval.lock."
+    required: false
+    default: "retrieval.lock"
+  config:
+    description: "Path to the pyproject.toml carrying [tool.retrieval_diff]."
+    required: false
+    default: "pyproject.toml"
+  python-version:
+    description: "Python version to run on."
+    required: false
+    default: "3.x"
+  allow-query-set-change:
+    description: "Permit a non-empty query-set delta instead of failing."
+    required: false
+    default: "false"
+  comment:
+    description: "Post the diff as a PR comment when a token is available."
+    required: false
+    default: "true"
+  github-token:
+    description: >-
+      Token used to post the PR comment. When empty, the comment step is
+      skipped (the check still runs and sets the exit code).
+    required: false
+    default: ""
+
+outputs:
+  passed:
+    description: "'true' if no regression was detected, else 'false'."
+    value: ${{ steps.check.outputs.passed }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install retrieval-diff
+      shell: bash
+      run: python -m pip install --upgrade "retrieval-diff"
+
+    - name: Run retrieval-diff check
+      id: check
+      shell: bash
+      env:
+        RDIFF_LOCK: ${{ inputs.lock }}
+        RDIFF_CONFIG: ${{ inputs.config }}
+        RDIFF_ALLOW_QUERY_SET_CHANGE: ${{ inputs.allow-query-set-change }}
+        RDIFF_COMMENT: ${{ inputs.comment }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: python -m retrieval_diff.action.entrypoint
