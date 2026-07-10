@@ -14,7 +14,7 @@ You can unit-test application code, but retrieval quality usually changes invisi
 
 - **Versioned, reviewable lockfile** — a `retrieval.lock` of per-query top-K ids/scores/ranks with sorted keys and a deterministic, cross-platform config fingerprint, so a change in *git* is minimal and human-readable.
 - **Per-query chunk diff** — added / removed / reordered / score-changed per chunk, with rank and score deltas and a normalized rank-churn metric in `[0, 1]`.
-- **Causal attribution** — held-fixed replay attributes each change to one axis (`embedding_model`, `chunk_params`, `index_content`, `reranker`, `alpha`), reporting `confirmed`, `ambiguous`, or `not_attributable`.
+- **Causal attribution** — held-fixed replay attributes each change to one axis (`embedding_model`, `chunk_params`, `index_content_hash`, `reranker`, `alpha`), reporting `confirmed`, `ambiguous`, or `not_attributable`.
 - **CI gate** — a pytest assertion and a GitHub Action fail the build when a golden chunk drops, churn exceeds a cap, or the query set silently drifts.
 - **Deterministic & offline by default** — a built-in hashing embedder and in-memory retrievers make the whole pipeline reproducible with no downloads, no network, and no clock or RNG inside the library.
 
