@@ -299,3 +299,89 @@ def test_attribute_term_and_markdown_formats(tmp_path: Path) -> None:
     )
     assert res_md.exit_code == EXIT_OK, res_md.output
     assert res_md.stdout.startswith("# retrieval-diff attribution")
+
+
+#: The example lockfile shipped with the repo (used by the ``show`` tests).
+EXAMPLE_LOCK = Path(__file__).resolve().parent.parent / "examples" / "retrieval.lock"
+
+
+def test_example_lock_exists() -> None:
+    """The show tests depend on the shipped example lockfile."""
+    assert EXAMPLE_LOCK.is_file(), f"missing example lock: {EXAMPLE_LOCK}"
+
+
+def test_show_term_format() -> None:
+    """show --format term prints the header and per-query hit tables."""
+    res = runner.invoke(app, ["show", str(EXAMPLE_LOCK), "--format", "term"])
+    assert res.exit_code == EXIT_OK, res.output
+    assert "retrieval-lock:" in res.stdout
+    assert "K=4" in res.stdout
+    assert "snapshot" in res.stdout
+
+
+def test_show_markdown_format() -> None:
+    """show --format md prints a Markdown header table and per-query tables."""
+    res = runner.invoke(app, ["show", str(EXAMPLE_LOCK), "-f", "md"])
+    assert res.exit_code == EXIT_OK, res.output
+    assert res.stdout.startswith("# retrieval-lock")
+    assert "| K | 4 |" in res.stdout
+    assert "| rank | id | score |" in res.stdout
+
+
+def test_show_json_format_and_query_filter() -> None:
+    """show --format json emits a structured view, filterable to one query."""
+    res = runner.invoke(app, ["show", str(EXAMPLE_LOCK), "--format", "json"])
+    assert res.exit_code == EXIT_OK, res.output
+    payload = json.loads(res.stdout)
+    assert payload["k"] == 4
+    assert payload["query_count"] == 3
+    assert len(payload["fingerprint"]["digest"]) == 64
+    assert set(payload["fingerprint"]["axes"]) == {
+        "alpha",
+        "chunk_params",
+        "embedding_model",
+        "index_content_hash",
+        "reranker",
+    }
+
+    one = "what does diff report"
+    res_one = runner.invoke(app, ["show", str(EXAMPLE_LOCK), "--format", "json", "--query", one])
+    assert res_one.exit_code == EXIT_OK, res_one.output
+    filtered = json.loads(res_one.stdout)
+    assert list(filtered["results"]) == [one]
+    # The header still reflects the full lockfile.
+    assert filtered["query_count"] == 3
+
+
+def test_show_unknown_query_errors() -> None:
+    """A --query not present in the lockfile fails cleanly with a clear message."""
+    res = runner.invoke(app, ["show", str(EXAMPLE_LOCK), "--query", "no such query"])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "not in lockfile" in res.output
+
+
+def test_show_unknown_format_errors() -> None:
+    """An unknown --format is a clean usage error."""
+    res = runner.invoke(app, ["show", str(EXAMPLE_LOCK), "--format", "xml"])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "unknown --format" in res.output
+
+
+def test_show_malformed_lock_uses_lockfile_error(tmp_path: Path) -> None:
+    """A corrupt lock surfaces the LockfileError message, not a traceback."""
+    bad = tmp_path / "bad.lock"
+    bad.write_text("{ not valid json", encoding="utf-8")
+    res = runner.invoke(app, ["show", str(bad)])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "not valid JSON" in res.output
+
+
+def test_show_unknown_version_lock_uses_lockfile_error(tmp_path: Path) -> None:
+    """An unknown (future) lock version surfaces the LockfileError message."""
+    lock = tmp_path / "future.lock"
+    data = json.loads(EXAMPLE_LOCK.read_text(encoding="utf-8"))
+    data["version"] = 999
+    lock.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    res = runner.invoke(app, ["show", str(lock)])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "newer than supported version" in res.output

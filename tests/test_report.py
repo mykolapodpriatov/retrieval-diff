@@ -5,11 +5,14 @@ from __future__ import annotations
 from rdiff_testkit import make_snapshot
 from retrieval_diff.budget import RegressionBudget, evaluate_budget
 from retrieval_diff.diff import diff_snapshots
+from retrieval_diff.fingerprint import ConfigFingerprint
 from retrieval_diff.report import (
     render_attributions_markdown,
     render_attributions_terminal,
     render_markdown,
     render_pr_comment,
+    render_snapshot_markdown,
+    render_snapshot_terminal,
     render_terminal,
 )
 from retrieval_diff.types import AxisAttribution, ChangeKind, ChangeRef
@@ -162,3 +165,36 @@ def test_attributions_markdown_handles_empty() -> None:
     assert md.startswith("# retrieval-diff attribution")
     assert "no attributable changes" in md
     assert md.endswith("\n")
+
+
+def test_snapshot_renderers_show_header_and_hits() -> None:
+    """The snapshot renderers include the header (label/K/digest) and top-K hits."""
+    fp = ConfigFingerprint(embedding_model="e1", alpha=0.5)
+    snap = make_snapshot(
+        {"q1": [("a", 0.9), ("b", 0.8)], "q2": [("c", 0.7)]},
+        k=2,
+        label="sha-1",
+        fingerprint=fp,
+    )
+    text = render_snapshot_terminal(snap)
+    assert "sha-1" in text
+    assert "K=2" in text
+    assert fp.digest() in text
+    assert "q1" in text and "q2" in text
+
+    md = render_snapshot_markdown(snap)
+    assert md.startswith("# retrieval-lock")
+    assert "| label | sha-1 |" in md
+    assert f"| digest | {fp.digest()} |" in md
+    assert md.endswith("\n")
+
+
+def test_snapshot_renderers_filter_to_single_query() -> None:
+    """A query filter renders only that query's table."""
+    snap = make_snapshot({"keep": [("a", 0.9)], "drop": [("b", 0.8)]}, k=1)
+    text = render_snapshot_terminal(snap, query="keep")
+    assert "keep" in text
+    assert "drop" not in text
+    md = render_snapshot_markdown(snap, query="keep")
+    assert "### `keep`" in md
+    assert "drop" not in md
