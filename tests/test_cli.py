@@ -232,3 +232,70 @@ def test_report_cli_writes_markdown(tmp_path: Path) -> None:
     assert res.exit_code == EXIT_OK
     assert out.exists()
     assert "# retrieval-diff report" in out.read_text(encoding="utf-8")
+
+
+def _attribute_lock_pair(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Snapshot a baseline and a perturbed candidate; return (old, new, pyproject)."""
+    _hook, pyproject = _project(tmp_path)
+    old = tmp_path / "old.lock"
+    new = tmp_path / "new.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(old), "--label", "old", "--config", str(pyproject)],
+    )
+    import os
+
+    os.environ["RDIFF_TEST_ALPHA"] = "0.0"
+    try:
+        runner.invoke(
+            app,
+            ["snapshot", "--out", str(new), "--label", "new", "--config", str(pyproject)],
+        )
+    finally:
+        del os.environ["RDIFF_TEST_ALPHA"]
+    return old, new, pyproject
+
+
+def test_attribute_unknown_format_errors(tmp_path: Path) -> None:
+    """attribute with an unknown --format is a clean usage error, not a traceback."""
+    old, new, pyproject = _attribute_lock_pair(tmp_path)
+    res = runner.invoke(
+        app,
+        ["attribute", str(old), str(new), "--config", str(pyproject), "--format", "bogus"],
+    )
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "unknown --format" in res.output
+
+
+def test_attribute_json_format_matches_default(tmp_path: Path) -> None:
+    """--format json is byte-identical to the (json) default for back-compat."""
+    old, new, pyproject = _attribute_lock_pair(tmp_path)
+    res_default = runner.invoke(app, ["attribute", str(old), str(new), "--config", str(pyproject)])
+    res_json = runner.invoke(
+        app,
+        ["attribute", str(old), str(new), "--config", str(pyproject), "--format", "json"],
+    )
+    assert res_default.exit_code == EXIT_OK, res_default.output
+    assert res_json.exit_code == EXIT_OK, res_json.output
+    assert res_json.stdout == res_default.stdout
+    # And it is still valid JSON of the documented shape.
+    payload = json.loads(res_json.stdout)
+    assert isinstance(payload, list)
+
+
+def test_attribute_term_and_markdown_formats(tmp_path: Path) -> None:
+    """attribute renders term and md tables in addition to json."""
+    old, new, pyproject = _attribute_lock_pair(tmp_path)
+    res_term = runner.invoke(
+        app,
+        ["attribute", str(old), str(new), "--config", str(pyproject), "--format", "term"],
+    )
+    assert res_term.exit_code == EXIT_OK, res_term.output
+    assert "retrieval-diff attribution" in res_term.stdout
+
+    res_md = runner.invoke(
+        app,
+        ["attribute", str(old), str(new), "--config", str(pyproject), "-f", "md"],
+    )
+    assert res_md.exit_code == EXIT_OK, res_md.output
+    assert res_md.stdout.startswith("# retrieval-diff attribution")

@@ -9,7 +9,8 @@ Subcommands:
   exit non-zero on a budget regression. A non-empty query-set delta fails unless
   ``--allow-query-set-change``.
 * ``attribute`` -- attribute the changes between two lockfiles to single config
-  axes via held-fixed replay (requires a factory wired through the project hook).
+  axes via held-fixed replay (requires a factory wired through the project hook),
+  in ``--format term|md|json`` (json is the default for back-compat).
 * ``report`` -- render a diff to Markdown.
 
 The retriever/query-set/factory are wired through a project hook (see
@@ -46,7 +47,12 @@ from retrieval_diff.diff import (
     KMismatchError,
     diff_snapshots,
 )
-from retrieval_diff.report import render_markdown, render_terminal
+from retrieval_diff.report import (
+    render_attributions_markdown,
+    render_attributions_terminal,
+    render_markdown,
+    render_terminal,
+)
 from retrieval_diff.snapshot import snapshot
 from retrieval_diff.types import Snapshot, SnapshotDiff
 
@@ -282,8 +288,11 @@ def attribute_cmd(
     config: Annotated[
         Path, typer.Option("--config", help="pyproject.toml with [tool.retrieval_diff].")
     ] = Path("pyproject.toml"),
+    fmt: Annotated[str, typer.Option("--format", "-f", help="Output: term | md | json.")] = "json",
 ) -> None:
     """Attribute the changes between two lockfiles to single config axes."""
+    if fmt not in {"term", "md", "json"}:
+        _fail(f"unknown --format {fmt!r}; expected term|md|json")
     old_snap, new_snap = _load_two(old, new)
     diff = _diff_or_fail(old_snap, new_snap)
 
@@ -299,19 +308,24 @@ def attribute_cmd(
         corpus=context.corpus,
     )
 
-    payload = [
-        {
-            "query": a.change_ref.query,
-            "chunk_id": a.change_ref.chunk_id,
-            "kind": a.change_ref.kind.value,
-            "axis": a.axis,
-            "confidence": a.confidence,
-            "evidence": a.evidence,
-        }
-        for a in attributions
-    ]
-    sys.stdout.write(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
-    sys.stdout.write("\n")
+    if fmt == "term":
+        sys.stdout.write(render_attributions_terminal(attributions))
+    elif fmt == "md":
+        sys.stdout.write(render_attributions_markdown(attributions))
+    else:
+        payload = [
+            {
+                "query": a.change_ref.query,
+                "chunk_id": a.change_ref.chunk_id,
+                "kind": a.change_ref.kind.value,
+                "axis": a.axis,
+                "confidence": a.confidence,
+                "evidence": a.evidence,
+            }
+            for a in attributions
+        ]
+        sys.stdout.write(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+        sys.stdout.write("\n")
 
 
 def main() -> None:  # pragma: no cover - thin console-script wrapper
