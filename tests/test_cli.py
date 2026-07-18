@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from retrieval_diff.cli import EXIT_OK, EXIT_REGRESSION, EXIT_USER_ERROR, app
@@ -407,3 +409,186 @@ def test_show_unknown_version_lock_uses_lockfile_error(tmp_path: Path) -> None:
     res = runner.invoke(app, ["show", str(future)])
     assert res.exit_code == EXIT_USER_ERROR
     assert "newer than supported version" in res.output
+
+
+# --- diff --format pr-comment (issue #7) -----------------------------------
+
+
+def test_diff_pr_comment_format_emits_collapsible_summary(tmp_path: Path) -> None:
+    """diff --format pr-comment emits the collapsible details block and glyph table."""
+    old, new, _pyproject = _attribute_lock_pair(tmp_path)
+    res = runner.invoke(app, ["diff", str(old), str(new), "--format", "pr-comment"])
+    assert res.exit_code == EXIT_OK, res.output
+    assert res.stdout.startswith("### retrieval-diff")
+    assert "<details>" in res.stdout
+    assert "</details>" in res.stdout
+    assert "per-query changes" in res.stdout
+    # The per-query glyph summary is a table keyed by query.
+    assert "| query | churn | changes |" in res.stdout
+    # The wired hook's queries appear as rows in the summary.
+    for query in _SHOW_QUERIES:
+        assert query in res.stdout
+
+
+def test_diff_pr_comment_no_change_reports_no_changes(tmp_path: Path) -> None:
+    """Diffing a lock against itself still renders the block with '(no changes)'."""
+    lock = _snapshot_lock(tmp_path)
+    res = runner.invoke(app, ["diff", str(lock), str(lock), "-f", "pr-comment"])
+    assert res.exit_code == EXIT_OK, res.output
+    assert "<details>" in res.stdout
+    assert "(no changes)" in res.stdout
+
+
+# --- check --format {term,md,json} (issue #6) ------------------------------
+
+
+def test_check_json_format_serializes_budget_and_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """check --format json emits a machine-readable verdict alongside the diff."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    monkeypatch.setenv("RDIFF_TEST_ALPHA", "0.0")
+    res = runner.invoke(
+        app,
+        [
+            "check",
+            "--lock",
+            str(lock),
+            "--config",
+            str(pyproject),
+            "--max-churn",
+            "0.0",
+            "--format",
+            "json",
+        ],
+    )
+    assert res.exit_code == EXIT_REGRESSION
+    payload = json.loads(res.stdout)
+    assert payload["passed"] is False
+    assert payload["violations"]
+    for violation in payload["violations"]:
+        assert set(violation) == {"kind", "query", "chunk_id", "message"}
+    # The diff is serialized alongside the verdict.
+    assert "diff" in payload
+    assert set(payload["diff"]["query_set_delta"]) == {"added_queries", "removed_queries"}
+
+
+def test_check_json_format_passes_cleanly(tmp_path: Path) -> None:
+    """A clean check emits ``passed`` true, empty violations, and exit 0."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    res = runner.invoke(
+        app,
+        ["check", "--lock", str(lock), "--config", str(pyproject), "--format", "json"],
+    )
+    assert res.exit_code == EXIT_OK, res.output
+    payload = json.loads(res.stdout)
+    assert payload["passed"] is True
+    assert payload["violations"] == []
+
+
+def test_check_markdown_format_includes_budget_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """check --format md renders the diff report plus the budget verdict section."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    monkeypatch.setenv("RDIFF_TEST_ALPHA", "0.0")
+    res = runner.invoke(
+        app,
+        [
+            "check",
+            "--lock",
+            str(lock),
+            "--config",
+            str(pyproject),
+            "--max-churn",
+            "0.0",
+            "-f",
+            "md",
+        ],
+    )
+    assert res.exit_code == EXIT_REGRESSION
+    assert "# retrieval-diff report" in res.stdout
+    assert "## Retrieval budget" in res.stdout
+    assert "FAILED" in res.stdout
+
+
+def test_check_unknown_format_errors(tmp_path: Path) -> None:
+    """An unknown check --format is a clean usage error, not a traceback."""
+    lock = _snapshot_lock(tmp_path)
+    pyproject = tmp_path / "pyproject.toml"
+    res = runner.invoke(
+        app,
+        ["check", "--lock", str(lock), "--config", str(pyproject), "--format", "xml"],
+    )
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "unknown --format" in res.output
+
+
+# --- check --junit-xml PATH (issue #8) -------------------------------------
+
+
+def test_check_junit_xml_written_on_regression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """check --junit-xml writes a JUnit report with a failure on a regression."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    monkeypatch.setenv("RDIFF_TEST_ALPHA", "0.0")
+    junit = tmp_path / "report.xml"
+    res = runner.invoke(
+        app,
+        [
+            "check",
+            "--lock",
+            str(lock),
+            "--config",
+            str(pyproject),
+            "--max-churn",
+            "0.0",
+            "--junit-xml",
+            str(junit),
+        ],
+    )
+    assert res.exit_code == EXIT_REGRESSION
+    assert junit.exists()
+    tree = ET.fromstring(junit.read_text(encoding="utf-8"))
+    assert tree.findall(".//testcase")
+    assert tree.findall(".//failure")
+
+
+def test_check_junit_xml_passing_has_no_failures(tmp_path: Path) -> None:
+    """A clean check still writes a JUnit report, with zero failures."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    junit = tmp_path / "report.xml"
+    res = runner.invoke(
+        app,
+        ["check", "--lock", str(lock), "--config", str(pyproject), "--junit-xml", str(junit)],
+    )
+    assert res.exit_code == EXIT_OK, res.output
+    tree = ET.fromstring(junit.read_text(encoding="utf-8"))
+    assert tree.findall(".//failure") == []
+    assert tree.findall(".//testcase")

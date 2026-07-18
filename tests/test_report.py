@@ -1,6 +1,9 @@
-"""Tests for terminal, Markdown, and PR-comment rendering shapes."""
+"""Tests for terminal, Markdown, PR-comment, budget, and JUnit rendering shapes."""
 
 from __future__ import annotations
+
+import json
+import xml.etree.ElementTree as ET
 
 from rdiff_testkit import make_snapshot
 from retrieval_diff.budget import RegressionBudget, evaluate_budget
@@ -9,6 +12,9 @@ from retrieval_diff.fingerprint import ConfigFingerprint
 from retrieval_diff.report import (
     render_attributions_markdown,
     render_attributions_terminal,
+    render_budget_json,
+    render_budget_markdown,
+    render_junit,
     render_markdown,
     render_pr_comment,
     render_snapshot_markdown,
@@ -165,6 +171,96 @@ def test_attributions_markdown_handles_empty() -> None:
     assert md.startswith("# retrieval-diff attribution")
     assert "no attributable changes" in md
     assert md.endswith("\n")
+
+
+def test_render_budget_json_serializes_verdict_and_violations() -> None:
+    """The budget JSON carries ``passed`` plus the documented per-violation fields."""
+    diff = _sample_diff()  # a removed golden -> a failing budget
+    report = evaluate_budget(diff, RegressionBudget(max_churn=1.0))
+    payload = json.loads(render_budget_json(report))
+    assert payload["passed"] is False
+    assert payload["violations"]
+    for violation in payload["violations"]:
+        assert set(violation) == {"kind", "query", "chunk_id", "message"}
+    # The removed golden 'g' for 'alpha query' is named in a violation.
+    assert any(v["query"] == "alpha query" and v["chunk_id"] == "g" for v in payload["violations"])
+
+
+def test_render_budget_json_passing_has_empty_violations() -> None:
+    """A clean diff yields ``passed`` true and no violations."""
+    snap = make_snapshot({"q": [("a", 0.9), ("b", 0.8)]}, k=2)
+    report = evaluate_budget(diff_snapshots(snap, snap), RegressionBudget())
+    payload = json.loads(render_budget_json(report))
+    assert payload == {"passed": True, "violations": []}
+
+
+def test_render_budget_markdown_failing_and_passing() -> None:
+    """The budget Markdown leads with the verdict and tabulates violations."""
+    diff = _sample_diff()
+    failing = render_budget_markdown(evaluate_budget(diff, RegressionBudget(max_churn=1.0)))
+    assert failing.startswith("## Retrieval budget")
+    assert "FAILED" in failing
+    assert "| kind | query | chunk | message |" in failing
+    assert failing.endswith("\n")
+
+    snap = make_snapshot({"q": [("a", 0.9), ("b", 0.8)]}, k=2)
+    clean = evaluate_budget(diff_snapshots(snap, snap), RegressionBudget())
+    passing = render_budget_markdown(clean)
+    assert "PASSED" in passing
+    assert "_no violations_" in passing
+
+
+def test_render_junit_one_testcase_per_query_and_golden() -> None:
+    """JUnit emits a testcase per query/golden and one failure per violation."""
+    diff = _sample_diff()  # removes golden 'g' for 'alpha query'
+    report = evaluate_budget(diff, RegressionBudget(max_churn=1.0))
+    xml = render_junit(diff, report)
+    assert xml.startswith("<?xml")
+
+    tree = ET.fromstring(xml)
+    testcases = tree.findall(".//testcase")
+    names = {tc.get("name") for tc in testcases}
+    # A testcase per intersected query ...
+    assert {"alpha query", "beta query"} <= names
+    # ... and a golden testcase for the removed golden movement.
+    assert "alpha query/g" in names
+
+    failures = tree.findall(".//failure")
+    assert len(failures) == len(report.violations)
+    # The failure is attached to the golden testcase, not a bare query.
+    golden_case = next(tc for tc in testcases if tc.get("name") == "alpha query/g")
+    assert golden_case.get("classname") == "golden"
+    assert golden_case.findall("failure")
+    # The suite header advertises the failure count.
+    suite = tree.find(".//testsuite")
+    assert suite is not None
+    assert suite.get("failures") == str(len(report.violations))
+
+
+def test_render_junit_passing_has_no_failures() -> None:
+    """A clean gate yields passing testcases and a zero failure count."""
+    snap = make_snapshot({"q": [("a", 0.9), ("b", 0.8)]}, k=2)
+    diff = diff_snapshots(snap, snap)
+    report = evaluate_budget(diff, RegressionBudget())
+    tree = ET.fromstring(render_junit(diff, report))
+    assert tree.findall(".//failure") == []
+    testcases = tree.findall(".//testcase")
+    assert [tc.get("name") for tc in testcases] == ["q"]
+    suite = tree.find(".//testsuite")
+    assert suite is not None
+    assert suite.get("failures") == "0"
+
+
+def test_render_junit_query_set_change_lands_on_budget_testcase() -> None:
+    """A violation that names no query (query-set change) is never dropped."""
+    old = make_snapshot({"shared": [("a", 0.9)], "old_q": [("x", 0.5)]}, k=1)
+    new = make_snapshot({"shared": [("a", 0.9)], "new_q": [("y", 0.5)]}, k=1)
+    diff = diff_snapshots(old, new)
+    report = evaluate_budget(diff, RegressionBudget())  # query_set_change_fails=True
+    tree = ET.fromstring(render_junit(diff, report))
+    budget_cases = [tc for tc in tree.findall(".//testcase") if tc.get("classname") == "budget"]
+    assert budget_cases
+    assert budget_cases[0].findall("failure")
 
 
 def test_snapshot_renderers_show_header_and_hits() -> None:
