@@ -1,11 +1,13 @@
 """Rendering of diffs and budget reports for terminals, Markdown, and PRs.
 
-Three output shapes:
+Output shapes:
 
 * :func:`render_terminal` -- a colored :mod:`rich` table for interactive use.
 * :func:`render_markdown` -- a full Markdown report for artifacts/PRs.
 * :func:`render_pr_comment` -- a compact, collapsible Markdown summary suited to
   a PR comment body.
+* :func:`render_budget_markdown` / :func:`render_budget_json` -- the CI gate's
+  pass/violations verdict for humans and machines respectively.
 
 All renderers are deterministic (stable id/query ordering) and read-only over
 the diff, so the same diff always produces the same text.
@@ -14,6 +16,7 @@ the diff, so the same diff always produces the same text.
 from __future__ import annotations
 
 import io
+import json
 from collections.abc import Mapping, Sequence
 
 from rich.console import Console
@@ -290,6 +293,61 @@ def render_pr_comment(diff: SnapshotDiff, *, budget_report: BudgetReport | None 
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _budget_report_payload(report: BudgetReport) -> dict[str, object]:
+    """Return a JSON-ready mapping of a budget report's verdict and violations."""
+    return {
+        "passed": report.passed,
+        "violations": [
+            {
+                "kind": violation.kind.value,
+                "query": violation.query,
+                "chunk_id": violation.chunk_id,
+                "message": violation.message,
+            }
+            for violation in report.violations
+        ],
+    }
+
+
+def render_budget_json(report: BudgetReport) -> str:
+    """Render a budget report as stable JSON for CI consumers.
+
+    Args:
+        report: The evaluated budget verdict.
+
+    Returns:
+        A JSON object with ``passed`` and a ``violations`` array; each violation
+        carries its ``kind``/``query``/``chunk_id``/``message`` so a gate consumer
+        can act on the result without scraping the terminal table.
+    """
+    return json.dumps(_budget_report_payload(report), sort_keys=True, indent=2, ensure_ascii=False)
+
+
+def render_budget_markdown(report: BudgetReport) -> str:
+    """Render a budget report as a Markdown status line plus a violations table.
+
+    Args:
+        report: The evaluated budget verdict.
+
+    Returns:
+        A Markdown fragment leading with the pass/fail status and, when it failed,
+        one table row per violation (kind, query, chunk, message).
+    """
+    status = "PASSED" if report.passed else f"FAILED ({len(report.violations)} violation(s))"
+    lines: list[str] = ["## Retrieval budget", "", f"**Status:** {status}", ""]
+    if not report.violations:
+        lines.append("_no violations_")
+        return "\n".join(lines).rstrip() + "\n"
+    lines.append("| kind | query | chunk | message |")
+    lines.append("| --- | --- | --- | --- |")
+    for violation in report.violations:
+        lines.append(
+            f"| {violation.kind.value} | {violation.query or ''} | "
+            f"{violation.chunk_id or ''} | {violation.message} |"
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _evidence_text(evidence: Mapping[str, object]) -> str:
     """Return a stable, single-string rendering of an attribution's evidence.
 
@@ -465,6 +523,8 @@ def render_snapshot_markdown(snap: Snapshot, *, query: str | None = None) -> str
 __all__ = [
     "render_attributions_markdown",
     "render_attributions_terminal",
+    "render_budget_json",
+    "render_budget_markdown",
     "render_markdown",
     "render_pr_comment",
     "render_snapshot_markdown",

@@ -7,7 +7,7 @@ Subcommands:
 * ``diff`` -- diff two lockfiles (``--format term|md|json``).
 * ``check`` -- re-snapshot the wired retriever, diff vs the committed lock, and
   exit non-zero on a budget regression. A non-empty query-set delta fails unless
-  ``--allow-query-set-change``.
+  ``--allow-query-set-change``. Emits ``--format term|md|json``.
 * ``attribute`` -- attribute the changes between two lockfiles to single config
   axes via held-fixed replay (requires a factory wired through the project hook),
   in ``--format term|md|json`` (json is the default for back-compat).
@@ -32,6 +32,7 @@ from rich.console import Console
 from retrieval_diff import lockfile
 from retrieval_diff.attribution import attribute as attribute_changes
 from retrieval_diff.budget import (
+    BudgetReport,
     RegressionBudget,
     audit_goldens_past_k,
     evaluate_budget,
@@ -52,6 +53,7 @@ from retrieval_diff.diff import (
 from retrieval_diff.report import (
     render_attributions_markdown,
     render_attributions_terminal,
+    render_budget_markdown,
     render_markdown,
     render_snapshot_markdown,
     render_snapshot_terminal,
@@ -150,9 +152,9 @@ def _diff_or_fail(old: Snapshot, new: Snapshot) -> SnapshotDiff:
         _fail(str(exc))
 
 
-def _diff_to_json(diff: SnapshotDiff) -> str:
-    """Serialize a diff to a stable JSON string for ``--format json``."""
-    payload = {
+def _diff_payload(diff: SnapshotDiff) -> dict[str, object]:
+    """Build a stable, JSON-ready mapping for a diff (shared by json renderers)."""
+    return {
         "k": diff.k,
         "fingerprint_delta": diff.fingerprint_delta,
         "query_set_delta": {
@@ -187,7 +189,27 @@ def _diff_to_json(diff: SnapshotDiff) -> str:
             for query, qd in sorted(diff.per_query.items())
         },
     }
-    return json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False)
+
+
+def _diff_to_json(diff: SnapshotDiff) -> str:
+    """Serialize a diff to a stable JSON string for ``--format json``."""
+    return json.dumps(_diff_payload(diff), sort_keys=True, indent=2, ensure_ascii=False)
+
+
+def _budget_payload(report: BudgetReport) -> dict[str, object]:
+    """Build a JSON-ready mapping of a budget verdict for the ``check`` gate."""
+    return {
+        "passed": report.passed,
+        "violations": [
+            {
+                "kind": violation.kind.value,
+                "query": violation.query,
+                "chunk_id": violation.chunk_id,
+                "message": violation.message,
+            }
+            for violation in report.violations
+        ],
+    }
 
 
 @app.command(name="diff")
@@ -252,8 +274,11 @@ def check_cmd(
         int | None,
         typer.Option("--max-golden-rank-drop", help="Override golden rank-drop cap."),
     ] = None,
+    fmt: Annotated[str, typer.Option("--format", "-f", help="Output: term | md | json.")] = "term",
 ) -> None:
     """Re-snapshot the wired retriever and fail CI on a budget regression."""
+    if fmt not in {"term", "md", "json"}:
+        _fail(f"unknown --format {fmt!r}; expected term|md|json")
     context, budget, _cfg_k = _resolve_context(config, None)
 
     if allow_query_set_change:
@@ -277,12 +302,21 @@ def check_cmd(
     audit_violations = audit_goldens_past_k(new, context.retriever, context.goldens, budget)
     report = evaluate_budget(diff, budget, audit_violations=audit_violations)
 
-    sys.stdout.write(render_terminal(diff))
-    if report.passed:
-        _out.print("[green]check passed[/green]: no retrieval regression")
-        raise typer.Exit(EXIT_OK)
-    _err.print(f"[red]{report.summary()}[/red]")
-    raise typer.Exit(EXIT_REGRESSION)
+    if fmt == "md":
+        sys.stdout.write(render_markdown(diff))
+        sys.stdout.write("\n")
+        sys.stdout.write(render_budget_markdown(report))
+    elif fmt == "json":
+        payload = {**_budget_payload(report), "diff": _diff_payload(diff)}
+        sys.stdout.write(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False) + "\n")
+    else:  # term: keep the human-facing rich table and verdict lines
+        sys.stdout.write(render_terminal(diff))
+        if report.passed:
+            _out.print("[green]check passed[/green]: no retrieval regression")
+        else:
+            _err.print(f"[red]{report.summary()}[/red]")
+
+    raise typer.Exit(EXIT_OK if report.passed else EXIT_REGRESSION)
 
 
 @app.command(name="attribute")

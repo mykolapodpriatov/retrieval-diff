@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from retrieval_diff.cli import EXIT_OK, EXIT_REGRESSION, EXIT_USER_ERROR, app
@@ -407,3 +408,103 @@ def test_show_unknown_version_lock_uses_lockfile_error(tmp_path: Path) -> None:
     res = runner.invoke(app, ["show", str(future)])
     assert res.exit_code == EXIT_USER_ERROR
     assert "newer than supported version" in res.output
+
+
+# --- check --format {term,md,json} (issue #6) ------------------------------
+
+
+def test_check_json_format_serializes_budget_and_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """check --format json emits a machine-readable verdict alongside the diff."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    monkeypatch.setenv("RDIFF_TEST_ALPHA", "0.0")
+    res = runner.invoke(
+        app,
+        [
+            "check",
+            "--lock",
+            str(lock),
+            "--config",
+            str(pyproject),
+            "--max-churn",
+            "0.0",
+            "--format",
+            "json",
+        ],
+    )
+    assert res.exit_code == EXIT_REGRESSION
+    payload = json.loads(res.stdout)
+    assert payload["passed"] is False
+    assert payload["violations"]
+    for violation in payload["violations"]:
+        assert set(violation) == {"kind", "query", "chunk_id", "message"}
+    # The diff is serialized alongside the verdict.
+    assert "diff" in payload
+    assert set(payload["diff"]["query_set_delta"]) == {"added_queries", "removed_queries"}
+
+
+def test_check_json_format_passes_cleanly(tmp_path: Path) -> None:
+    """A clean check emits ``passed`` true, empty violations, and exit 0."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    res = runner.invoke(
+        app,
+        ["check", "--lock", str(lock), "--config", str(pyproject), "--format", "json"],
+    )
+    assert res.exit_code == EXIT_OK, res.output
+    payload = json.loads(res.stdout)
+    assert payload["passed"] is True
+    assert payload["violations"] == []
+
+
+def test_check_markdown_format_includes_budget_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """check --format md renders the diff report plus the budget verdict section."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    monkeypatch.setenv("RDIFF_TEST_ALPHA", "0.0")
+    res = runner.invoke(
+        app,
+        [
+            "check",
+            "--lock",
+            str(lock),
+            "--config",
+            str(pyproject),
+            "--max-churn",
+            "0.0",
+            "-f",
+            "md",
+        ],
+    )
+    assert res.exit_code == EXIT_REGRESSION
+    assert "# retrieval-diff report" in res.stdout
+    assert "## Retrieval budget" in res.stdout
+    assert "FAILED" in res.stdout
+
+
+def test_check_unknown_format_errors(tmp_path: Path) -> None:
+    """An unknown check --format is a clean usage error, not a traceback."""
+    lock = _snapshot_lock(tmp_path)
+    pyproject = tmp_path / "pyproject.toml"
+    res = runner.invoke(
+        app,
+        ["check", "--lock", str(lock), "--config", str(pyproject), "--format", "xml"],
+    )
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "unknown --format" in res.output

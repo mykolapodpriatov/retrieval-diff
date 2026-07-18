@@ -1,6 +1,8 @@
-"""Tests for terminal, Markdown, and PR-comment rendering shapes."""
+"""Tests for terminal, Markdown, PR-comment, and budget rendering shapes."""
 
 from __future__ import annotations
+
+import json
 
 from rdiff_testkit import make_snapshot
 from retrieval_diff.budget import RegressionBudget, evaluate_budget
@@ -9,6 +11,8 @@ from retrieval_diff.fingerprint import ConfigFingerprint
 from retrieval_diff.report import (
     render_attributions_markdown,
     render_attributions_terminal,
+    render_budget_json,
+    render_budget_markdown,
     render_markdown,
     render_pr_comment,
     render_snapshot_markdown,
@@ -165,6 +169,43 @@ def test_attributions_markdown_handles_empty() -> None:
     assert md.startswith("# retrieval-diff attribution")
     assert "no attributable changes" in md
     assert md.endswith("\n")
+
+
+def test_render_budget_json_serializes_verdict_and_violations() -> None:
+    """The budget JSON carries ``passed`` plus the documented per-violation fields."""
+    diff = _sample_diff()  # a removed golden -> a failing budget
+    report = evaluate_budget(diff, RegressionBudget(max_churn=1.0))
+    payload = json.loads(render_budget_json(report))
+    assert payload["passed"] is False
+    assert payload["violations"]
+    for violation in payload["violations"]:
+        assert set(violation) == {"kind", "query", "chunk_id", "message"}
+    # The removed golden 'g' for 'alpha query' is named in a violation.
+    assert any(v["query"] == "alpha query" and v["chunk_id"] == "g" for v in payload["violations"])
+
+
+def test_render_budget_json_passing_has_empty_violations() -> None:
+    """A clean diff yields ``passed`` true and no violations."""
+    snap = make_snapshot({"q": [("a", 0.9), ("b", 0.8)]}, k=2)
+    report = evaluate_budget(diff_snapshots(snap, snap), RegressionBudget())
+    payload = json.loads(render_budget_json(report))
+    assert payload == {"passed": True, "violations": []}
+
+
+def test_render_budget_markdown_failing_and_passing() -> None:
+    """The budget Markdown leads with the verdict and tabulates violations."""
+    diff = _sample_diff()
+    failing = render_budget_markdown(evaluate_budget(diff, RegressionBudget(max_churn=1.0)))
+    assert failing.startswith("## Retrieval budget")
+    assert "FAILED" in failing
+    assert "| kind | query | chunk | message |" in failing
+    assert failing.endswith("\n")
+
+    snap = make_snapshot({"q": [("a", 0.9), ("b", 0.8)]}, k=2)
+    clean = evaluate_budget(diff_snapshots(snap, snap), RegressionBudget())
+    passing = render_budget_markdown(clean)
+    assert "PASSED" in passing
+    assert "_no violations_" in passing
 
 
 def test_snapshot_renderers_show_header_and_hits() -> None:
