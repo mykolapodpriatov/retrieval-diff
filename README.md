@@ -68,9 +68,13 @@ retrieval-diff snapshot --out retrieval.lock --label "$(git rev-parse HEAD)"
 # On a PR: re-run retrieval, diff vs the committed lock, fail on a regression.
 retrieval-diff check --lock retrieval.lock
 
-# Inspect the change, or attribute it to a config axis.
+# Inspect the change, or attribute it to a config axis (term | md | json).
 retrieval-diff diff OLD.lock NEW.lock --format term
-retrieval-diff attribute OLD.lock NEW.lock
+retrieval-diff attribute OLD.lock NEW.lock --format json   # json is the default
+
+# Inspect a single committed lock (header + top-K hits), optionally one query.
+retrieval-diff show retrieval.lock --format term
+retrieval-diff show retrieval.lock --query "first query" --format json
 ```
 
 Gate it from pytest:

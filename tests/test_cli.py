@@ -232,3 +232,178 @@ def test_report_cli_writes_markdown(tmp_path: Path) -> None:
     assert res.exit_code == EXIT_OK
     assert out.exists()
     assert "# retrieval-diff report" in out.read_text(encoding="utf-8")
+
+
+def _attribute_lock_pair(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Snapshot a baseline and a perturbed candidate; return (old, new, pyproject)."""
+    _hook, pyproject = _project(tmp_path)
+    old = tmp_path / "old.lock"
+    new = tmp_path / "new.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(old), "--label", "old", "--config", str(pyproject)],
+    )
+    import os
+
+    os.environ["RDIFF_TEST_ALPHA"] = "0.0"
+    try:
+        runner.invoke(
+            app,
+            ["snapshot", "--out", str(new), "--label", "new", "--config", str(pyproject)],
+        )
+    finally:
+        del os.environ["RDIFF_TEST_ALPHA"]
+    return old, new, pyproject
+
+
+def test_attribute_unknown_format_errors(tmp_path: Path) -> None:
+    """attribute with an unknown --format is a clean usage error, not a traceback."""
+    old, new, pyproject = _attribute_lock_pair(tmp_path)
+    res = runner.invoke(
+        app,
+        ["attribute", str(old), str(new), "--config", str(pyproject), "--format", "bogus"],
+    )
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "unknown --format" in res.output
+
+
+def test_attribute_json_format_matches_default(tmp_path: Path) -> None:
+    """--format json is byte-identical to the (json) default for back-compat."""
+    old, new, pyproject = _attribute_lock_pair(tmp_path)
+    res_default = runner.invoke(app, ["attribute", str(old), str(new), "--config", str(pyproject)])
+    res_json = runner.invoke(
+        app,
+        ["attribute", str(old), str(new), "--config", str(pyproject), "--format", "json"],
+    )
+    assert res_default.exit_code == EXIT_OK, res_default.output
+    assert res_json.exit_code == EXIT_OK, res_json.output
+    assert res_json.stdout == res_default.stdout
+    # And it is still valid JSON of the documented shape.
+    payload = json.loads(res_json.stdout)
+    assert isinstance(payload, list)
+
+
+def test_attribute_term_and_markdown_formats(tmp_path: Path) -> None:
+    """attribute renders term and md tables in addition to json."""
+    old, new, pyproject = _attribute_lock_pair(tmp_path)
+    res_term = runner.invoke(
+        app,
+        ["attribute", str(old), str(new), "--config", str(pyproject), "--format", "term"],
+    )
+    assert res_term.exit_code == EXIT_OK, res_term.output
+    assert "retrieval-diff attribution" in res_term.stdout
+
+    res_md = runner.invoke(
+        app,
+        ["attribute", str(old), str(new), "--config", str(pyproject), "-f", "md"],
+    )
+    assert res_md.exit_code == EXIT_OK, res_md.output
+    assert res_md.stdout.startswith("# retrieval-diff attribution")
+
+
+#: Queries and K produced by the shared test hook (see ``_HOOK`` / ``_PYPROJECT``).
+_SHOW_QUERIES = ("the fox", "vector search")
+_SHOW_K = 3
+
+
+def _snapshot_lock(tmp_path: Path, *, label: str = "sha-1") -> Path:
+    """Snapshot the wired retriever into a fresh lockfile and return its path.
+
+    Self-contained: the lock is generated on the fly in ``tmp_path`` (never read
+    from the gitignored ``examples/retrieval.lock``), mirroring how the other
+    tests in this file produce a lock.
+    """
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    res = runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", label, "--config", str(pyproject)],
+    )
+    assert res.exit_code == EXIT_OK, res.output
+    return lock
+
+
+def test_show_term_format(tmp_path: Path) -> None:
+    """show --format term prints the header and per-query hit tables."""
+    lock = _snapshot_lock(tmp_path)
+    res = runner.invoke(app, ["show", str(lock), "--format", "term"])
+    assert res.exit_code == EXIT_OK, res.output
+    assert "retrieval-lock:" in res.stdout
+    assert f"K={_SHOW_K}" in res.stdout
+    # Every captured query is rendered as its own table.
+    for query in _SHOW_QUERIES:
+        assert query in res.stdout
+
+
+def test_show_markdown_format(tmp_path: Path) -> None:
+    """show --format md prints a Markdown header table and per-query tables."""
+    lock = _snapshot_lock(tmp_path)
+    res = runner.invoke(app, ["show", str(lock), "-f", "md"])
+    assert res.exit_code == EXIT_OK, res.output
+    assert res.stdout.startswith("# retrieval-lock")
+    assert f"| K | {_SHOW_K} |" in res.stdout
+    assert "| rank | id | score |" in res.stdout
+
+
+def test_show_json_format_and_query_filter(tmp_path: Path) -> None:
+    """show --format json emits a structured view, filterable to one query."""
+    lock = _snapshot_lock(tmp_path)
+    res = runner.invoke(app, ["show", str(lock), "--format", "json"])
+    assert res.exit_code == EXIT_OK, res.output
+    payload = json.loads(res.stdout)
+    assert payload["k"] == _SHOW_K
+    assert payload["query_count"] == len(_SHOW_QUERIES)
+    assert len(payload["fingerprint"]["digest"]) == 64
+    assert set(payload["fingerprint"]["axes"]) == {
+        "alpha",
+        "chunk_params",
+        "embedding_model",
+        "index_content_hash",
+        "reranker",
+    }
+    assert set(payload["results"]) == set(_SHOW_QUERIES)
+
+    one = _SHOW_QUERIES[0]
+    res_one = runner.invoke(app, ["show", str(lock), "--format", "json", "--query", one])
+    assert res_one.exit_code == EXIT_OK, res_one.output
+    filtered = json.loads(res_one.stdout)
+    assert list(filtered["results"]) == [one]
+    # The header still reflects the full lockfile.
+    assert filtered["query_count"] == len(_SHOW_QUERIES)
+
+
+def test_show_unknown_query_errors(tmp_path: Path) -> None:
+    """A --query not present in the lockfile fails cleanly with a clear message."""
+    lock = _snapshot_lock(tmp_path)
+    res = runner.invoke(app, ["show", str(lock), "--query", "no such query"])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "not in lockfile" in res.output
+
+
+def test_show_unknown_format_errors(tmp_path: Path) -> None:
+    """An unknown --format is a clean usage error."""
+    lock = _snapshot_lock(tmp_path)
+    res = runner.invoke(app, ["show", str(lock), "--format", "xml"])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "unknown --format" in res.output
+
+
+def test_show_malformed_lock_uses_lockfile_error(tmp_path: Path) -> None:
+    """A corrupt lock surfaces the LockfileError message, not a traceback."""
+    bad = tmp_path / "bad.lock"
+    bad.write_text("{ not valid json", encoding="utf-8")
+    res = runner.invoke(app, ["show", str(bad)])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "not valid JSON" in res.output
+
+
+def test_show_unknown_version_lock_uses_lockfile_error(tmp_path: Path) -> None:
+    """An unknown (future) lock version surfaces the LockfileError message."""
+    lock = _snapshot_lock(tmp_path)
+    future = tmp_path / "future.lock"
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    data["version"] = 999
+    future.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    res = runner.invoke(app, ["show", str(future)])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "newer than supported version" in res.output

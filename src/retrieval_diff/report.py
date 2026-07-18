@@ -14,12 +14,22 @@ the diff, so the same diff always produces the same text.
 from __future__ import annotations
 
 import io
+from collections.abc import Mapping, Sequence
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from retrieval_diff.budget import BudgetReport
-from retrieval_diff.types import ChangeKind, QueryDiff, SnapshotDiff
+from retrieval_diff.types import (
+    AxisAttribution,
+    ChangeKind,
+    Confidence,
+    QueryDiff,
+    QueryResult,
+    Snapshot,
+    SnapshotDiff,
+)
 
 #: Glyphs used to summarize a chunk's change set in compact views.
 _KIND_GLYPH = {
@@ -37,6 +47,16 @@ _KIND_STYLE = {
     ChangeKind.SCORE_CHANGED: "cyan",
     ChangeKind.UNCHANGED: "dim",
 }
+
+#: Terminal styles keyed by attribution confidence verdict.
+_CONFIDENCE_STYLE: dict[Confidence, str] = {
+    "confirmed": "green",
+    "ambiguous": "yellow",
+    "not_attributable": "dim",
+}
+
+#: Placeholder shown where an attribution has no single responsible axis.
+_NO_AXIS = "·"
 
 
 def _kinds_label(kinds: set[ChangeKind]) -> str:
@@ -270,8 +290,184 @@ def render_pr_comment(diff: SnapshotDiff, *, budget_report: BudgetReport | None 
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _evidence_text(evidence: Mapping[str, object]) -> str:
+    """Return a stable, single-string rendering of an attribution's evidence.
+
+    Keys are sorted for determinism; list/tuple values render as ``[a, b]`` and
+    scalars via ``str``. The result is plain text (no ``rich`` markup), so it is
+    safe to place verbatim in a :class:`~rich.text.Text` cell even though axis
+    lists contain the ``[`` and ``]`` characters that markup would try to parse.
+    """
+    parts: list[str] = []
+    for key in sorted(evidence):
+        value = evidence[key]
+        if isinstance(value, (list, tuple)):
+            rendered = "[" + ", ".join(str(item) for item in value) + "]"
+        else:
+            rendered = str(value)
+        parts.append(f"{key}={rendered}")
+    return "; ".join(parts)
+
+
+def render_attributions_terminal(
+    attributions: Sequence[AxisAttribution], *, console: Console | None = None
+) -> str:
+    """Render axis attributions as a colored :mod:`rich` table.
+
+    Args:
+        attributions: The per-change verdicts to render.
+        console: Optional console; a string-capturing console is used by default
+            so callers can both print and test the output.
+
+    Returns:
+        The rendered table text (ANSI stripped when captured to a string buffer).
+    """
+    buffer = io.StringIO()
+    con = console or Console(file=buffer, force_terminal=False, width=120)
+    table = Table(title="retrieval-diff attribution", show_lines=False)
+    table.add_column("query", overflow="fold")
+    table.add_column("chunk", overflow="fold")
+    table.add_column("kind")
+    table.add_column("axis")
+    table.add_column("confidence")
+    table.add_column("evidence", overflow="fold")
+    for attribution in attributions:
+        ref = attribution.change_ref
+        # User-controlled fields are added as Text (never markup-parsed) so that
+        # a query, chunk id, or bracketed evidence value can never be mistaken
+        # for a rich style tag.
+        table.add_row(
+            Text(ref.query),
+            Text(ref.chunk_id),
+            Text(ref.kind.value),
+            Text(attribution.axis or _NO_AXIS),
+            Text(attribution.confidence, style=_CONFIDENCE_STYLE[attribution.confidence]),
+            Text(_evidence_text(attribution.evidence)),
+        )
+    con.print(table)
+    return buffer.getvalue()
+
+
+def render_attributions_markdown(attributions: Sequence[AxisAttribution]) -> str:
+    """Render axis attributions as a Markdown table.
+
+    Returns:
+        A Markdown document with one row per change (query, chunk, kind, axis,
+        confidence, evidence), or a short note when there are no attributions.
+    """
+    lines: list[str] = ["# retrieval-diff attribution", ""]
+    if not attributions:
+        lines.append("_no attributable changes_")
+        return "\n".join(lines).rstrip() + "\n"
+    lines.append("| query | chunk | kind | axis | confidence | evidence |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    for attribution in attributions:
+        ref = attribution.change_ref
+        lines.append(
+            f"| {ref.query} | {ref.chunk_id} | {ref.kind.value} | "
+            f"{attribution.axis or _NO_AXIS} | {attribution.confidence} | "
+            f"{_evidence_text(attribution.evidence)} |"
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _snapshot_header_text(snap: Snapshot) -> str:
+    """Return the one-line lockfile header (K, label, query count, digest, axes)."""
+    fp = snap.fingerprint
+    axes = (
+        f"embedding_model={fp.embedding_model!r}, "
+        f"chunk_params={fp.chunk_params}, "
+        f"index_content_hash={fp.index_content_hash!r}, "
+        f"reranker={fp.reranker!r}, "
+        f"alpha={fp.alpha}"
+    )
+    return (
+        f"retrieval-lock: label={snap.created_label!r} K={snap.k} "
+        f"queries={len(snap.results)} | digest={fp.digest()} | axes: {axes}"
+    )
+
+
+def _snapshot_query_table(query: str, qr: QueryResult) -> Table:
+    """Build a rich table of a single query's rank-ordered top-K hits."""
+    table = Table(title=f"query: {query!r}  (top-{len(qr.hits)})", show_lines=False)
+    table.add_column("rank", justify="right")
+    table.add_column("id", overflow="fold")
+    table.add_column("score", justify="right")
+    for hit in sorted(qr.hits, key=lambda h: h.rank):
+        table.add_row(str(hit.rank), Text(hit.id), f"{hit.score:.4f}")
+    return table
+
+
+def _snapshot_queries(snap: Snapshot, query: str | None) -> list[str]:
+    """Return the queries to render: a single filter or all, sorted."""
+    return [query] if query is not None else sorted(snap.results)
+
+
+def render_snapshot_terminal(
+    snap: Snapshot, *, query: str | None = None, console: Console | None = None
+) -> str:
+    """Render a single lockfile as a header line plus per-query hit tables.
+
+    Args:
+        snap: The loaded snapshot to inspect.
+        query: When given, render only this query (assumed present).
+        console: Optional console; a string-capturing console is used by default.
+
+    Returns:
+        The rendered text (ANSI stripped when captured to a string buffer).
+    """
+    buffer = io.StringIO()
+    con = console or Console(file=buffer, force_terminal=False, width=100)
+    con.print(_snapshot_header_text(snap))
+    for q in _snapshot_queries(snap, query):
+        con.print(_snapshot_query_table(q, snap.results[q]))
+    return buffer.getvalue()
+
+
+def render_snapshot_markdown(snap: Snapshot, *, query: str | None = None) -> str:
+    """Render a single lockfile as a Markdown header table plus per-query tables.
+
+    Args:
+        snap: The loaded snapshot to inspect.
+        query: When given, render only this query (assumed present).
+
+    Returns:
+        A Markdown document with a header section and one table per query.
+    """
+    fp = snap.fingerprint
+    lines: list[str] = ["# retrieval-lock", ""]
+    lines.append("## Header")
+    lines.append("")
+    lines.append("| field | value |")
+    lines.append("| --- | --- |")
+    lines.append(f"| label | {snap.created_label} |")
+    lines.append(f"| K | {snap.k} |")
+    lines.append(f"| queries | {len(snap.results)} |")
+    lines.append(f"| digest | {fp.digest()} |")
+    lines.append(f"| embedding_model | {fp.embedding_model} |")
+    lines.append(f"| chunk_params | {fp.chunk_params} |")
+    lines.append(f"| index_content_hash | {fp.index_content_hash} |")
+    lines.append(f"| reranker | {fp.reranker} |")
+    lines.append(f"| alpha | {fp.alpha} |")
+    lines.append("")
+    for q in _snapshot_queries(snap, query):
+        qr = snap.results[q]
+        lines.append(f"### `{q}` (top-{len(qr.hits)})")
+        lines.append("")
+        lines.append("| rank | id | score |")
+        lines.append("| --- | --- | --- |")
+        for hit in sorted(qr.hits, key=lambda h: h.rank):
+            lines.append(f"| {hit.rank} | {hit.id} | {hit.score:.4f} |")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 __all__ = [
+    "render_attributions_markdown",
+    "render_attributions_terminal",
     "render_markdown",
     "render_pr_comment",
+    "render_snapshot_markdown",
+    "render_snapshot_terminal",
     "render_terminal",
 ]

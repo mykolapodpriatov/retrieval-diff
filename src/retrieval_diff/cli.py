@@ -9,7 +9,10 @@ Subcommands:
   exit non-zero on a budget regression. A non-empty query-set delta fails unless
   ``--allow-query-set-change``.
 * ``attribute`` -- attribute the changes between two lockfiles to single config
-  axes via held-fixed replay (requires a factory wired through the project hook).
+  axes via held-fixed replay (requires a factory wired through the project hook),
+  in ``--format term|md|json`` (json is the default for back-compat).
+* ``show`` -- inspect a single committed lockfile (header + top-K hits),
+  optionally filtered to one ``--query``, in ``--format term|md|json``.
 * ``report`` -- render a diff to Markdown.
 
 The retriever/query-set/factory are wired through a project hook (see
@@ -46,7 +49,14 @@ from retrieval_diff.diff import (
     KMismatchError,
     diff_snapshots,
 )
-from retrieval_diff.report import render_markdown, render_terminal
+from retrieval_diff.report import (
+    render_attributions_markdown,
+    render_attributions_terminal,
+    render_markdown,
+    render_snapshot_markdown,
+    render_snapshot_terminal,
+    render_terminal,
+)
 from retrieval_diff.snapshot import snapshot
 from retrieval_diff.types import Snapshot, SnapshotDiff
 
@@ -282,8 +292,11 @@ def attribute_cmd(
     config: Annotated[
         Path, typer.Option("--config", help="pyproject.toml with [tool.retrieval_diff].")
     ] = Path("pyproject.toml"),
+    fmt: Annotated[str, typer.Option("--format", "-f", help="Output: term | md | json.")] = "json",
 ) -> None:
     """Attribute the changes between two lockfiles to single config axes."""
+    if fmt not in {"term", "md", "json"}:
+        _fail(f"unknown --format {fmt!r}; expected term|md|json")
     old_snap, new_snap = _load_two(old, new)
     diff = _diff_or_fail(old_snap, new_snap)
 
@@ -299,19 +312,87 @@ def attribute_cmd(
         corpus=context.corpus,
     )
 
-    payload = [
-        {
-            "query": a.change_ref.query,
-            "chunk_id": a.change_ref.chunk_id,
-            "kind": a.change_ref.kind.value,
-            "axis": a.axis,
-            "confidence": a.confidence,
-            "evidence": a.evidence,
-        }
-        for a in attributions
-    ]
-    sys.stdout.write(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
-    sys.stdout.write("\n")
+    if fmt == "term":
+        sys.stdout.write(render_attributions_terminal(attributions))
+    elif fmt == "md":
+        sys.stdout.write(render_attributions_markdown(attributions))
+    else:
+        payload = [
+            {
+                "query": a.change_ref.query,
+                "chunk_id": a.change_ref.chunk_id,
+                "kind": a.change_ref.kind.value,
+                "axis": a.axis,
+                "confidence": a.confidence,
+                "evidence": a.evidence,
+            }
+            for a in attributions
+        ]
+        sys.stdout.write(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False))
+        sys.stdout.write("\n")
+
+
+def _snapshot_to_json(snap: Snapshot, query: str | None) -> str:
+    """Serialize a lockfile view to a stable JSON string for ``show --format json``.
+
+    When ``query`` is given only that query's hits are included; the header
+    (label, K, fingerprint digest and axes) and the total ``query_count`` always
+    reflect the full lockfile.
+    """
+    fp = snap.fingerprint
+    queries = [query] if query is not None else sorted(snap.results)
+    payload = {
+        "created_label": snap.created_label,
+        "k": snap.k,
+        "query_count": len(snap.results),
+        "version": snap.version,
+        "fingerprint": {
+            "digest": fp.digest(),
+            "axes": {
+                "alpha": fp.alpha,
+                "chunk_params": dict(sorted(fp.chunk_params.items())),
+                "embedding_model": fp.embedding_model,
+                "index_content_hash": fp.index_content_hash,
+                "reranker": fp.reranker,
+            },
+        },
+        "results": {
+            q: {
+                "hits": [
+                    {"id": hit.id, "rank": hit.rank, "score": hit.score}
+                    for hit in sorted(snap.results[q].hits, key=lambda h: h.rank)
+                ]
+            }
+            for q in queries
+        },
+    }
+    return json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False)
+
+
+@app.command(name="show")
+def show_cmd(
+    lock: Annotated[Path, typer.Argument(help="Lockfile to inspect.")],
+    query: Annotated[
+        str | None,
+        typer.Option("--query", help="Show only this query (must exist in the lock)."),
+    ] = None,
+    fmt: Annotated[str, typer.Option("--format", "-f", help="Output: term | md | json.")] = "term",
+) -> None:
+    """Inspect a single lockfile: its header and top-K ids/scores/ranks."""
+    if fmt not in {"term", "md", "json"}:
+        _fail(f"unknown --format {fmt!r}; expected term|md|json")
+    try:
+        snap = lockfile.load(lock)
+    except lockfile.LockfileError as exc:
+        _fail(str(exc))
+    if query is not None and query not in snap.results:
+        _fail(f"query {query!r} not in lockfile; known queries: {sorted(snap.results)}")
+    if fmt == "term":
+        sys.stdout.write(render_snapshot_terminal(snap, query=query))
+    elif fmt == "md":
+        sys.stdout.write(render_snapshot_markdown(snap, query=query))
+    else:
+        sys.stdout.write(_snapshot_to_json(snap, query) + "\n")
 
 
 def main() -> None:  # pragma: no cover - thin console-script wrapper
