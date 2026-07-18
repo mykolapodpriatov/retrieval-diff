@@ -4,7 +4,7 @@ Subcommands:
 
 * ``snapshot`` -- capture a retriever's top-K output into a lockfile (``--label``
   is **required**; the library never reads the clock).
-* ``diff`` -- diff two lockfiles (``--format term|md|json``).
+* ``diff`` -- diff two lockfiles (``--format term|md|json|pr-comment``).
 * ``check`` -- re-snapshot the wired retriever, diff vs the committed lock, and
   exit non-zero on a budget regression. A non-empty query-set delta fails unless
   ``--allow-query-set-change``. Emits ``--format term|md|json``.
@@ -55,6 +55,7 @@ from retrieval_diff.report import (
     render_attributions_terminal,
     render_budget_markdown,
     render_markdown,
+    render_pr_comment,
     render_snapshot_markdown,
     render_snapshot_terminal,
     render_terminal,
@@ -216,17 +217,22 @@ def _budget_payload(report: BudgetReport) -> dict[str, object]:
 def diff_cmd(
     old: Annotated[Path, typer.Argument(help="Baseline lockfile.")],
     new: Annotated[Path, typer.Argument(help="Candidate lockfile.")],
-    fmt: Annotated[str, typer.Option("--format", "-f", help="Output: term | md | json.")] = "term",
+    fmt: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output: term | md | json | pr-comment."),
+    ] = "term",
 ) -> None:
     """Diff two lockfiles and print the result in the requested format."""
-    if fmt not in {"term", "md", "json"}:
-        _fail(f"unknown --format {fmt!r}; expected term|md|json")
+    if fmt not in {"term", "md", "json", "pr-comment"}:
+        _fail(f"unknown --format {fmt!r}; expected term|md|json|pr-comment")
     old_snap, new_snap = _load_two(old, new)
     diff = _diff_or_fail(old_snap, new_snap)
     if fmt == "term":
         sys.stdout.write(render_terminal(diff))
     elif fmt == "md":
         sys.stdout.write(render_markdown(diff))
+    elif fmt == "pr-comment":
+        sys.stdout.write(render_pr_comment(diff))
     else:
         sys.stdout.write(_diff_to_json(diff) + "\n")
 

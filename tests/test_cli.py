@@ -410,6 +410,34 @@ def test_show_unknown_version_lock_uses_lockfile_error(tmp_path: Path) -> None:
     assert "newer than supported version" in res.output
 
 
+# --- diff --format pr-comment (issue #7) -----------------------------------
+
+
+def test_diff_pr_comment_format_emits_collapsible_summary(tmp_path: Path) -> None:
+    """diff --format pr-comment emits the collapsible details block and glyph table."""
+    old, new, _pyproject = _attribute_lock_pair(tmp_path)
+    res = runner.invoke(app, ["diff", str(old), str(new), "--format", "pr-comment"])
+    assert res.exit_code == EXIT_OK, res.output
+    assert res.stdout.startswith("### retrieval-diff")
+    assert "<details>" in res.stdout
+    assert "</details>" in res.stdout
+    assert "per-query changes" in res.stdout
+    # The per-query glyph summary is a table keyed by query.
+    assert "| query | churn | changes |" in res.stdout
+    # The wired hook's queries appear as rows in the summary.
+    for query in _SHOW_QUERIES:
+        assert query in res.stdout
+
+
+def test_diff_pr_comment_no_change_reports_no_changes(tmp_path: Path) -> None:
+    """Diffing a lock against itself still renders the block with '(no changes)'."""
+    lock = _snapshot_lock(tmp_path)
+    res = runner.invoke(app, ["diff", str(lock), str(lock), "-f", "pr-comment"])
+    assert res.exit_code == EXIT_OK, res.output
+    assert "<details>" in res.stdout
+    assert "(no changes)" in res.stdout
+
+
 # --- check --format {term,md,json} (issue #6) ------------------------------
 
 
