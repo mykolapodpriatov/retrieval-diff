@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -536,3 +537,58 @@ def test_check_unknown_format_errors(tmp_path: Path) -> None:
     )
     assert res.exit_code == EXIT_USER_ERROR
     assert "unknown --format" in res.output
+
+
+# --- check --junit-xml PATH (issue #8) -------------------------------------
+
+
+def test_check_junit_xml_written_on_regression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """check --junit-xml writes a JUnit report with a failure on a regression."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    monkeypatch.setenv("RDIFF_TEST_ALPHA", "0.0")
+    junit = tmp_path / "report.xml"
+    res = runner.invoke(
+        app,
+        [
+            "check",
+            "--lock",
+            str(lock),
+            "--config",
+            str(pyproject),
+            "--max-churn",
+            "0.0",
+            "--junit-xml",
+            str(junit),
+        ],
+    )
+    assert res.exit_code == EXIT_REGRESSION
+    assert junit.exists()
+    tree = ET.fromstring(junit.read_text(encoding="utf-8"))
+    assert tree.findall(".//testcase")
+    assert tree.findall(".//failure")
+
+
+def test_check_junit_xml_passing_has_no_failures(tmp_path: Path) -> None:
+    """A clean check still writes a JUnit report, with zero failures."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    junit = tmp_path / "report.xml"
+    res = runner.invoke(
+        app,
+        ["check", "--lock", str(lock), "--config", str(pyproject), "--junit-xml", str(junit)],
+    )
+    assert res.exit_code == EXIT_OK, res.output
+    tree = ET.fromstring(junit.read_text(encoding="utf-8"))
+    assert tree.findall(".//failure") == []
+    assert tree.findall(".//testcase")

@@ -8,6 +8,7 @@ Output shapes:
   a PR comment body.
 * :func:`render_budget_markdown` / :func:`render_budget_json` -- the CI gate's
   pass/violations verdict for humans and machines respectively.
+* :func:`render_junit` -- a JUnit XML test report for Jenkins/GitLab ingestion.
 
 All renderers are deterministic (stable id/query ordering) and read-only over
 the diff, so the same diff always produces the same text.
@@ -17,13 +18,14 @@ from __future__ import annotations
 
 import io
 import json
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
 
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from retrieval_diff.budget import BudgetReport
+from retrieval_diff.budget import BudgetReport, BudgetViolation, ViolationKind
 from retrieval_diff.types import (
     AxisAttribution,
     ChangeKind,
@@ -348,6 +350,79 @@ def render_budget_markdown(report: BudgetReport) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+#: Violation kinds that concern a declared golden chunk (attached to a ``golden``
+#: testcase in the JUnit report rather than a bare query testcase).
+_GOLDEN_VIOLATION_KINDS = frozenset(
+    {
+        ViolationKind.REMOVED_GOLDEN,
+        ViolationKind.GOLDEN_RANK_DROP,
+        ViolationKind.GOLDEN_NEVER_RETRIEVED,
+        ViolationKind.GOLDEN_DISPLACED_PAST_K,
+    }
+)
+
+
+def _violation_testcase(violation: BudgetViolation) -> tuple[str, str]:
+    """Return the ``(classname, name)`` of the JUnit testcase a violation maps to."""
+    if (
+        violation.kind in _GOLDEN_VIOLATION_KINDS
+        and violation.query is not None
+        and violation.chunk_id is not None
+    ):
+        return "golden", f"{violation.query}/{violation.chunk_id}"
+    if violation.query is not None:
+        return "query", violation.query
+    return "budget", violation.kind.value
+
+
+def render_junit(diff: SnapshotDiff, budget_report: BudgetReport) -> str:
+    """Render the gate result as a JUnit XML test report.
+
+    One ``<testcase>`` is emitted per diffed query and per declared golden
+    movement (so unaffected queries/goldens appear as passing cases), and one
+    ``<failure>`` per :class:`~retrieval_diff.budget.BudgetViolation`, attached to
+    the query or golden it concerns. A violation that names no query (e.g. a
+    query-set change) lands on a synthetic ``budget`` testcase so no failure is
+    ever dropped.
+
+    Args:
+        diff: The old-vs-new snapshot diff (supplies the passing testcases).
+        budget_report: The evaluated budget whose violations become failures.
+
+    Returns:
+        A pretty-printed JUnit XML document (a ``<testsuites>`` root wrapping a
+        single ``<testsuite>``) suitable for Jenkins/GitLab test-report ingestion.
+    """
+    failures_by_case: dict[tuple[str, str], list[BudgetViolation]] = {}
+    for query in sorted(diff.per_query):
+        failures_by_case.setdefault(("query", query), [])
+    for move in diff.summary.golden_movements:
+        failures_by_case.setdefault(("golden", f"{move.query}/{move.golden_id}"), [])
+    for violation in budget_report.violations:
+        failures_by_case.setdefault(_violation_testcase(violation), []).append(violation)
+
+    total_failures = sum(len(violations) for violations in failures_by_case.values())
+    root = ET.Element("testsuites")
+    suite = ET.SubElement(
+        root,
+        "testsuite",
+        name="retrieval-diff",
+        tests=str(len(failures_by_case)),
+        failures=str(total_failures),
+    )
+    for key in sorted(failures_by_case):
+        classname, name = key
+        case = ET.SubElement(suite, "testcase", classname=classname, name=name)
+        for violation in failures_by_case[key]:
+            failure = ET.SubElement(
+                case, "failure", type=violation.kind.value, message=violation.message
+            )
+            failure.text = violation.message
+    ET.indent(root)
+    body = ET.tostring(root, encoding="unicode")
+    return f'<?xml version="1.0" encoding="utf-8"?>\n{body}\n'
+
+
 def _evidence_text(evidence: Mapping[str, object]) -> str:
     """Return a stable, single-string rendering of an attribution's evidence.
 
@@ -525,6 +600,7 @@ __all__ = [
     "render_attributions_terminal",
     "render_budget_json",
     "render_budget_markdown",
+    "render_junit",
     "render_markdown",
     "render_pr_comment",
     "render_snapshot_markdown",

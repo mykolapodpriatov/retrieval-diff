@@ -7,7 +7,8 @@ Subcommands:
 * ``diff`` -- diff two lockfiles (``--format term|md|json|pr-comment``).
 * ``check`` -- re-snapshot the wired retriever, diff vs the committed lock, and
   exit non-zero on a budget regression. A non-empty query-set delta fails unless
-  ``--allow-query-set-change``. Emits ``--format term|md|json``.
+  ``--allow-query-set-change``. Emits ``--format term|md|json`` and can also write
+  a JUnit report via ``--junit-xml PATH``.
 * ``attribute`` -- attribute the changes between two lockfiles to single config
   axes via held-fixed replay (requires a factory wired through the project hook),
   in ``--format term|md|json`` (json is the default for back-compat).
@@ -54,6 +55,7 @@ from retrieval_diff.report import (
     render_attributions_markdown,
     render_attributions_terminal,
     render_budget_markdown,
+    render_junit,
     render_markdown,
     render_pr_comment,
     render_snapshot_markdown,
@@ -281,6 +283,10 @@ def check_cmd(
         typer.Option("--max-golden-rank-drop", help="Override golden rank-drop cap."),
     ] = None,
     fmt: Annotated[str, typer.Option("--format", "-f", help="Output: term | md | json.")] = "term",
+    junit_xml: Annotated[
+        Path | None,
+        typer.Option("--junit-xml", help="Also write a JUnit XML report to this path."),
+    ] = None,
 ) -> None:
     """Re-snapshot the wired retriever and fail CI on a budget regression."""
     if fmt not in {"term", "md", "json"}:
@@ -307,6 +313,9 @@ def check_cmd(
 
     audit_violations = audit_goldens_past_k(new, context.retriever, context.goldens, budget)
     report = evaluate_budget(diff, budget, audit_violations=audit_violations)
+
+    if junit_xml is not None:
+        junit_xml.write_text(render_junit(diff, report), encoding="utf-8")
 
     if fmt == "md":
         sys.stdout.write(render_markdown(diff))
