@@ -50,12 +50,13 @@ query_set_change_fails = true
 # myproject/rdiff_hook.py
 from retrieval_diff.config import ProjectContext
 
+
 def build_context(queries):
-    retriever = build_my_retriever()           # your existing code
+    retriever = build_my_retriever()  # your existing code
     return ProjectContext(
         retriever=retriever,
         queries=("first query", "second query"),
-        goldens={"first query": {"doc-42"}},   # the chunks CI must protect
+        goldens={"first query": {"doc-42"}},  # the chunks CI must protect
     )
 ```
 
@@ -83,9 +84,12 @@ Gate it from pytest:
 from retrieval_diff.budget import RegressionBudget
 from retrieval_diff.pytest_plugin import assert_no_regression
 
+
 def test_retrieval_does_not_regress():
     assert_no_regression(
-        "retrieval.lock", build_my_retriever(), QUERIES,
+        "retrieval.lock",
+        build_my_retriever(),
+        QUERIES,
         RegressionBudget(max_golden_rank_drop=2, max_churn=0.5),
         goldens={"first query": {"doc-42"}},
     )
@@ -128,7 +132,7 @@ A composite action runs `retrieval-diff check`, sets the exit code, and optional
 - [x] Held-fixed causal attribution engine
 - [x] pytest assertion + GitHub Action CI gate
 - [x] Rich terminal + Markdown reports
-- [ ] Concrete FAISS / Chroma / Qdrant / pgvector adapters (interfaces are in place)
+- [x] Concrete FAISS adapter (Chroma / Qdrant / pgvector interfaces are in place, query paths still stubbed)
 
 ## Development
 
