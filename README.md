@@ -128,7 +128,7 @@ A composite action runs `retrieval-diff check`, sets the exit code, and optional
 - [x] Held-fixed causal attribution engine
 - [x] pytest assertion + GitHub Action CI gate
 - [x] Rich terminal + Markdown reports
-- [ ] Concrete FAISS / Chroma / Qdrant / pgvector adapters (interfaces are in place)
+- [x] Concrete FAISS adapter (Chroma / Qdrant / pgvector interfaces are in place, query paths still stubbed)
 
 ## Development
 
