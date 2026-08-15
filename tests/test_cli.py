@@ -675,3 +675,80 @@ def test_check_query_regex_scopes_budget_and_junit(tmp_path: Path) -> None:
     names = {case.get("name") for case in tree.findall(".//testcase")}
     assert names == {"vector search"}
     assert tree.findall(".//failure") == []
+
+
+# --- snapshot --refresh QUERY (issue #14) ----------------------------------
+
+
+def test_snapshot_refresh_updates_only_named_row(tmp_path: Path) -> None:
+    """Refreshing one of two queries rewrites that row and leaves the other intact."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    original = json.loads(lock.read_text(encoding="utf-8"))
+    mutated = json.loads(lock.read_text(encoding="utf-8"))
+    for query in mutated["results"]:
+        mutated["results"][query]["hits"][0]["score"] = 0.123456
+    lock.write_text(json.dumps(mutated, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    res = runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--refresh", "the fox", "--config", str(pyproject)],
+    )
+    assert res.exit_code == EXIT_OK, res.output
+    updated = json.loads(lock.read_text(encoding="utf-8"))
+    assert updated["created_label"] == "sha-1"
+    assert set(updated["results"]) == set(original["results"])
+    assert updated["results"]["the fox"] == original["results"]["the fox"]
+    assert updated["results"]["vector search"] == mutated["results"]["vector search"]
+    assert updated["results"]["vector search"] != original["results"]["vector search"]
+
+
+def test_snapshot_refresh_unknown_name_exits_2(tmp_path: Path) -> None:
+    """Refreshing a query the hook does not declare is a usage error."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    res = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(lock),
+            "--label",
+            "sha-1",
+            "--refresh",
+            "no such query",
+            "--config",
+            str(pyproject),
+        ],
+    )
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "not in the query set" in res.output
+    assert not lock.exists()
+
+
+def test_snapshot_refresh_missing_out_writes_one_row(tmp_path: Path) -> None:
+    """--refresh with no existing --out file still writes a one-row lock."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    res = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(lock),
+            "--label",
+            "sha-1",
+            "--refresh",
+            "the fox",
+            "--config",
+            str(pyproject),
+        ],
+    )
+    assert res.exit_code == EXIT_OK, res.output
+    payload = json.loads(lock.read_text(encoding="utf-8"))
+    assert payload["created_label"] == "sha-1"
+    assert list(payload["results"]) == ["the fox"]
