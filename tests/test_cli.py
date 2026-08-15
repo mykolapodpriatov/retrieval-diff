@@ -592,3 +592,86 @@ def test_check_junit_xml_passing_has_no_failures(tmp_path: Path) -> None:
     tree = ET.fromstring(junit.read_text(encoding="utf-8"))
     assert tree.findall(".//failure") == []
     assert tree.findall(".//testcase")
+
+
+# --- diff/check --query REGEX (issue #13) ----------------------------------
+
+
+def test_diff_query_regex_scopes_to_matching_queries(tmp_path: Path) -> None:
+    """A matching --query diffs only that query, not the rest of the lock."""
+    old, new, _pyproject = _attribute_lock_pair(tmp_path)
+    res = runner.invoke(
+        app,
+        ["diff", str(old), str(new), "--format", "json", "--query", r"^the fox$"],
+    )
+    assert res.exit_code == EXIT_OK, res.output
+    payload = json.loads(res.stdout)
+    assert list(payload["per_query"]) == ["the fox"]
+
+
+def test_diff_query_regex_no_match_exits_2(tmp_path: Path) -> None:
+    """A regex that matches no query is a usage error, not an empty-intersection crash."""
+    lock = _snapshot_lock(tmp_path)
+    res = runner.invoke(app, ["diff", str(lock), str(lock), "--query", "no-such-query"])
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "matched no queries" in res.output
+
+
+def test_diff_without_query_flag_is_unchanged(tmp_path: Path) -> None:
+    """Omitting --query still diffs every query (existing unfiltered behaviour)."""
+    old, new, _pyproject = _attribute_lock_pair(tmp_path)
+    res = runner.invoke(app, ["diff", str(old), str(new), "--format", "json"])
+    assert res.exit_code == EXIT_OK, res.output
+    payload = json.loads(res.stdout)
+    assert set(payload["per_query"]) == set(_SHOW_QUERIES)
+
+
+def test_check_query_regex_scopes_budget_and_junit(tmp_path: Path) -> None:
+    """A scoped check cannot fail on a query outside the --query filter."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    runner.invoke(
+        app,
+        ["snapshot", "--out", str(lock), "--label", "sha-1", "--config", str(pyproject)],
+    )
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    # Reorder only "the fox" so an unfiltered check fails on churn, but a scope
+    # of "vector search" stays clean.
+    fox_hits = data["results"]["the fox"]["hits"]
+    fox_hits[0], fox_hits[1] = fox_hits[1], fox_hits[0]
+    fox_hits[0]["rank"], fox_hits[1]["rank"] = 0, 1
+    lock.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+    unfiltered = runner.invoke(
+        app,
+        ["check", "--lock", str(lock), "--config", str(pyproject), "--max-churn", "0.0"],
+    )
+    assert unfiltered.exit_code == EXIT_REGRESSION
+
+    junit = tmp_path / "scoped.xml"
+    scoped = runner.invoke(
+        app,
+        [
+            "check",
+            "--lock",
+            str(lock),
+            "--config",
+            str(pyproject),
+            "--max-churn",
+            "0.0",
+            "--query",
+            r"^vector search$",
+            "--junit-xml",
+            str(junit),
+            "--format",
+            "json",
+        ],
+    )
+    assert scoped.exit_code == EXIT_OK, scoped.output
+    payload = json.loads(scoped.stdout)
+    assert payload["passed"] is True
+    assert set(payload["diff"]["per_query"]) == {"vector search"}
+    tree = ET.fromstring(junit.read_text(encoding="utf-8"))
+    names = {case.get("name") for case in tree.findall(".//testcase")}
+    assert names == {"vector search"}
+    assert tree.findall(".//failure") == []

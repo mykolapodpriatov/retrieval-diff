@@ -4,11 +4,13 @@ Subcommands:
 
 * ``snapshot`` -- capture a retriever's top-K output into a lockfile (``--label``
   is **required**; the library never reads the clock).
-* ``diff`` -- diff two lockfiles (``--format term|md|json|pr-comment``).
+* ``diff`` -- diff two lockfiles (``--format term|md|json|pr-comment``). Repeatable
+  ``--query REGEX`` scopes both lockfiles to matching query ids first.
 * ``check`` -- re-snapshot the wired retriever, diff vs the committed lock, and
   exit non-zero on a budget regression. A non-empty query-set delta fails unless
   ``--allow-query-set-change``. Emits ``--format term|md|json`` and can also write
-  a JUnit report via ``--junit-xml PATH``.
+  a JUnit report via ``--junit-xml PATH``. Repeatable ``--query REGEX`` scopes the
+  budget and JUnit report to matching queries.
 * ``attribute`` -- attribute the changes between two lockfiles to single config
   axes via held-fixed replay (requires a factory wired through the project hook),
   in ``--format term|md|json`` (json is the default for back-compat).
@@ -23,7 +25,9 @@ The retriever/query-set/factory are wired through a project hook (see
 from __future__ import annotations
 
 import json
+import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -147,6 +151,44 @@ def _load_two(old_path: Path, new_path: Path) -> tuple[Snapshot, Snapshot]:
     return old, new
 
 
+def _compile_query_regexes(patterns: Sequence[str]) -> list[re.Pattern[str]]:
+    """Compile ``--query`` patterns, failing on an invalid regex."""
+    compiled: list[re.Pattern[str]] = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern))
+        except re.error as exc:
+            _fail(f"invalid --query regex {pattern!r}: {exc}")
+    return compiled
+
+
+def _filter_snapshot(snap: Snapshot, regexes: Sequence[re.Pattern[str]]) -> Snapshot:
+    """Return a copy of ``snap`` whose results match any of ``regexes``."""
+    kept = {
+        query: result
+        for query, result in snap.results.items()
+        if any(rx.search(query) for rx in regexes)
+    }
+    return snap.model_copy(update={"results": kept})
+
+
+def _filter_pair(
+    old: Snapshot, new: Snapshot, patterns: Sequence[str]
+) -> tuple[Snapshot, Snapshot]:
+    """Scope both snapshots to ``--query`` matches before diffing.
+
+    No matches in the union of both query sets is a usage error (exit 2), not
+    an empty-intersection crash from :func:`diff_snapshots`.
+    """
+    regexes = _compile_query_regexes(patterns)
+    old_filtered = _filter_snapshot(old, regexes)
+    new_filtered = _filter_snapshot(new, regexes)
+    if not old_filtered.results and not new_filtered.results:
+        known = sorted(set(old.results) | set(new.results))
+        _fail(f"--query matched no queries; known queries: {known}")
+    return old_filtered, new_filtered
+
+
 def _diff_or_fail(old: Snapshot, new: Snapshot) -> SnapshotDiff:
     """Diff two snapshots, mapping diff errors to clean CLI failures."""
     try:
@@ -223,11 +265,20 @@ def diff_cmd(
         str,
         typer.Option("--format", "-f", help="Output: term | md | json | pr-comment."),
     ] = "term",
+    query: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--query",
+            help="Only compare queries matching this regex (repeatable).",
+        ),
+    ] = None,
 ) -> None:
     """Diff two lockfiles and print the result in the requested format."""
     if fmt not in {"term", "md", "json", "pr-comment"}:
         _fail(f"unknown --format {fmt!r}; expected term|md|json|pr-comment")
     old_snap, new_snap = _load_two(old, new)
+    if query:
+        old_snap, new_snap = _filter_pair(old_snap, new_snap, query)
     diff = _diff_or_fail(old_snap, new_snap)
     if fmt == "term":
         sys.stdout.write(render_terminal(diff))
@@ -287,6 +338,13 @@ def check_cmd(
         Path | None,
         typer.Option("--junit-xml", help="Also write a JUnit XML report to this path."),
     ] = None,
+    query: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--query",
+            help="Only evaluate queries matching this regex (repeatable).",
+        ),
+    ] = None,
 ) -> None:
     """Re-snapshot the wired retriever and fail CI on a budget regression."""
     if fmt not in {"term", "md", "json"}:
@@ -306,6 +364,8 @@ def check_cmd(
         _fail(str(exc))
 
     new = snapshot(context.retriever, context.queries, old.k, label=label)
+    if query:
+        old, new = _filter_pair(old, new, query)
     try:
         diff = diff_snapshots(old, new, score_eps=DEFAULT_SCORE_EPS, goldens=context.goldens)
     except (KMismatchError, EmptyIntersectionError) as exc:
