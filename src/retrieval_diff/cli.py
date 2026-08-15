@@ -3,7 +3,9 @@
 Subcommands:
 
 * ``snapshot`` -- capture a retriever's top-K output into a lockfile (``--label``
-  is **required**; the library never reads the clock).
+  is **required** on a full write; the library never reads the clock). Repeatable
+  ``--refresh QUERY`` re-records only those queries, merging into an existing
+  ``--out`` lock (label kept unless ``--label`` is passed).
 * ``diff`` -- diff two lockfiles (``--format term|md|json|pr-comment``). Repeatable
   ``--query REGEX`` scopes both lockfiles to matching query ids first.
 * ``check`` -- re-snapshot the wired retriever, diff vs the committed lock, and
@@ -66,7 +68,7 @@ from retrieval_diff.report import (
     render_snapshot_terminal,
     render_terminal,
 )
-from retrieval_diff.snapshot import snapshot
+from retrieval_diff.snapshot import SNAPSHOT_VERSION, snapshot
 from retrieval_diff.types import Snapshot, SnapshotDiff
 
 app = typer.Typer(
@@ -117,10 +119,52 @@ def _resolve_context(
     return context, cfg.budget, cfg.k
 
 
+def _refresh_names(names: Sequence[str], known: Sequence[str]) -> list[str]:
+    """Validate ``--refresh`` names against the wired query set (order-preserving)."""
+    known_set = set(known)
+    missing = [name for name in names if name not in known_set]
+    if missing:
+        _fail(
+            f"--refresh query {missing[0]!r} is not in the query set; "
+            f"known queries: {sorted(known)}"
+        )
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _merge_refresh(
+    existing: Snapshot,
+    partial: Snapshot,
+    *,
+    label: str,
+) -> Snapshot:
+    """Replace or append refreshed query rows onto ``existing``."""
+    merged = dict(existing.results)
+    merged.update(partial.results)
+    return Snapshot(
+        version=SNAPSHOT_VERSION,
+        created_label=label,
+        fingerprint=partial.fingerprint,
+        k=partial.k,
+        results=merged,
+    )
+
+
 @app.command(name="snapshot")
 def snapshot_cmd(
     out: Annotated[Path, typer.Option("--out", "-o", help="Lockfile path to write.")],
-    label: Annotated[str, typer.Option("--label", help="Required stable label, e.g. a git SHA.")],
+    label: Annotated[
+        str | None,
+        typer.Option(
+            "--label",
+            help="Stable label (git SHA). Required unless --refresh updates a lock.",
+        ),
+    ] = None,
     queries: Annotated[
         Path | None,
         typer.Option("--queries", help="JSONL query file (overrides config)."),
@@ -129,16 +173,47 @@ def snapshot_cmd(
         Path, typer.Option("--config", help="pyproject.toml with [tool.retrieval_diff].")
     ] = Path("pyproject.toml"),
     k: Annotated[int | None, typer.Option("--k", help="Top-K depth (overrides config).")] = None,
+    refresh: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--refresh",
+            help="Re-record only these queries and merge into --out (repeatable).",
+        ),
+    ] = None,
 ) -> None:
     """Snapshot the wired retriever's top-K output into a lockfile."""
-    if not label:
-        _fail("--label is required and must be non-empty")
     query_override = load_queries(queries) if queries is not None else None
     context, _budget, cfg_k = _resolve_context(config, query_override)
-    depth = k if k is not None else cfg_k
-    snap = snapshot(context.retriever, context.queries, depth, label=label)
+
+    if refresh:
+        names = _refresh_names(refresh, context.queries)
+        existing: Snapshot | None = None
+        if out.exists():
+            try:
+                existing = lockfile.load(out)
+            except lockfile.LockfileError as exc:
+                _fail(str(exc))
+            chosen_label = label if label else existing.created_label
+            depth = k if k is not None else existing.k
+        else:
+            chosen_label = label
+            depth = k if k is not None else cfg_k
+        if not chosen_label:
+            _fail("--label is required and must be non-empty")
+        partial = snapshot(context.retriever, names, depth, label=chosen_label)
+        snap = (
+            _merge_refresh(existing, partial, label=chosen_label)
+            if existing is not None
+            else partial
+        )
+    else:
+        if not label:
+            _fail("--label is required and must be non-empty")
+        depth = k if k is not None else cfg_k
+        snap = snapshot(context.retriever, context.queries, depth, label=label)
+
     lockfile.save(snap, out)
-    _out.print(f"[green]wrote[/green] {out} ({len(snap.results)} queries, K={depth})")
+    _out.print(f"[green]wrote[/green] {out} ({len(snap.results)} queries, K={snap.k})")
 
 
 def _load_two(old_path: Path, new_path: Path) -> tuple[Snapshot, Snapshot]:
