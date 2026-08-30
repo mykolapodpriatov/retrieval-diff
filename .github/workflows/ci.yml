@@ -72,14 +72,48 @@ jobs:
       # adapter suites skip there. This job installs the backends so their
       # real query paths are actually exercised. Every one of them runs
       # in-process (FAISS index, Chroma ephemeral client, Qdrant `:memory:`)
-      # -- no service containers, no network.
+      # -- no service containers, no network. The pgvector suite runs its
+      # database-free half here; its integration half lives in `pgvector`.
       - name: Install with adapter extras
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,faiss,chroma,qdrant]"
+          python -m pip install -e ".[dev,faiss,chroma,qdrant,pg]"
       - name: Run adapter tests
         run: >
           pytest -q
           tests/test_faiss_adapter.py
           tests/test_chroma_adapter.py
           tests/test_qdrant_adapter.py
+          tests/test_pgvector_adapter.py
+
+  pgvector:
+    name: pgvector against PostgreSQL
+    runs-on: ubuntu-latest
+    # The pgvector adapter is the one backend that cannot run in-process, so
+    # its integration half is skipped everywhere unless RETRIEVAL_DIFF_PG_DSN
+    # points at a real database. This job is where it points at one.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install with the pg extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,pg]"
+      - name: Run pgvector tests
+        env:
+          RETRIEVAL_DIFF_PG_DSN: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: pytest -q tests/test_pgvector_adapter.py
