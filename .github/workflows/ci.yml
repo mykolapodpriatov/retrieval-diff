@@ -59,3 +59,27 @@ jobs:
         run: >
           coverage report --fail-under=90
           --include="*/retrieval_diff/diff.py,*/retrieval_diff/attribution.py,*/retrieval_diff/budget.py,*/retrieval_diff/lockfile.py"
+
+  adapters:
+    name: Backend adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # The `test` matrix deliberately installs no optional extras, so the
+      # adapter suites skip there. This job installs the backends so their
+      # real query paths are actually exercised. Every one of them runs
+      # in-process (FAISS index, Chroma ephemeral client, Qdrant `:memory:`)
+      # -- no service containers, no network.
+      - name: Install with adapter extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,faiss,chroma,qdrant]"
+      - name: Run adapter tests
+        run: >
+          pytest -q
+          tests/test_faiss_adapter.py
+          tests/test_chroma_adapter.py
+          tests/test_qdrant_adapter.py
