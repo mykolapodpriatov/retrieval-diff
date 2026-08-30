@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -112,16 +113,23 @@ def test_action_yaml_exists() -> None:
 
 
 @pytest.mark.parametrize(
-    ("ctor", "args", "extra"),
+    ("ctor", "args", "extra", "backend"),
     [
-        (FaissRetriever, (object(), [], lambda q: []), "faiss"),
-        (ChromaRetriever, (object(),), "chroma"),
-        (QdrantRetriever, (object(), "c", lambda q: []), "qdrant"),
-        (PgVectorRetriever, ("dsn", "t", lambda q: []), "pg"),
+        (FaissRetriever, (object(), [], lambda q: []), "faiss", "faiss"),
+        (ChromaRetriever, (object(),), "chroma", "chromadb"),
+        (QdrantRetriever, (object(), "c", lambda q: []), "qdrant", "qdrant_client"),
+        (PgVectorRetriever, ("dsn", "t", lambda q: []), "pg", "psycopg"),
     ],
 )
-def test_adapter_import_guard(ctor, args, extra) -> None:  # type: ignore[no-untyped-def]
-    """Each adapter raises MissingDependencyError naming its extra when uninstalled."""
+def test_adapter_import_guard(ctor, args, extra, backend) -> None:  # type: ignore[no-untyped-def]
+    """Each adapter raises MissingDependencyError naming its extra when uninstalled.
+
+    Skipped per-backend when that backend *is* installed — the guard only fires
+    on a missing import, so there is nothing to assert. The `adapters` CI job
+    installs the extras; the `test` matrix does not.
+    """
+    if importlib.util.find_spec(backend) is not None:
+        pytest.skip(f"{backend} is installed; the import guard cannot fire")
     with pytest.raises(MissingDependencyError) as excinfo:
         ctor(*args, ConfigFingerprint())
     assert excinfo.value.extra == extra

@@ -1,14 +1,15 @@
-"""Adapter stubs for external vector stores (behind optional extras).
+"""Adapters for external vector stores (behind optional extras).
 
 Each adapter wraps an existing index/client as a
 :class:`~retrieval_diff.retrievers.Retriever` so retrieval-diff can snapshot it.
 The heavy client libraries are **import-guarded**: importing this package never
 pulls in FAISS/Chroma/Qdrant/pgvector. Instantiating an adapter raises a clear
 :class:`MissingDependencyError` listing the extra to install (e.g.
-``pip install "retrieval-diff[faiss]"``) until the adapter is fully implemented.
+``pip install "retrieval-diff[faiss]"``).
 
-These are M4 scaffolding: the interface is fixed and the import-guard contract is
-tested; the concrete query/translation logic lands next.
+FAISS, Chroma and Qdrant implement their real query paths. pgvector is still M4
+scaffolding: its interface is fixed and its import-guard contract is tested, but
+the concrete query/translation logic lands next.
 """
 
 from __future__ import annotations
