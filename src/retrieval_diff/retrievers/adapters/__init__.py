@@ -7,9 +7,8 @@ pulls in FAISS/Chroma/Qdrant/pgvector. Instantiating an adapter raises a clear
 :class:`MissingDependencyError` listing the extra to install (e.g.
 ``pip install "retrieval-diff[faiss]"``).
 
-FAISS, Chroma and Qdrant implement their real query paths. pgvector is still M4
-scaffolding: its interface is fixed and its import-guard contract is tested, but
-the concrete query/translation logic lands next.
+Every adapter -- FAISS, Chroma, Qdrant and pgvector -- implements its real
+query path.
 """
 
 from __future__ import annotations
