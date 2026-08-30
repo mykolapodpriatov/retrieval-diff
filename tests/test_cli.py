@@ -752,3 +752,24 @@ def test_snapshot_refresh_missing_out_writes_one_row(tmp_path: Path) -> None:
     payload = json.loads(lock.read_text(encoding="utf-8"))
     assert payload["created_label"] == "sha-1"
     assert list(payload["results"]) == ["the fox"]
+
+
+def test_snapshot_refresh_missing_out_without_label_exits_2(tmp_path: Path) -> None:
+    """--refresh cannot borrow a label when there is no lock to borrow it from."""
+    _hook, pyproject = _project(tmp_path)
+    lock = tmp_path / "retrieval.lock"
+    res = runner.invoke(
+        app,
+        [
+            "snapshot",
+            "--out",
+            str(lock),
+            "--refresh",
+            "the fox",
+            "--config",
+            str(pyproject),
+        ],
+    )
+    assert res.exit_code == EXIT_USER_ERROR
+    assert "--label is required" in res.output
+    assert not lock.exists()

@@ -188,6 +188,7 @@ def snapshot_cmd(
     if refresh:
         names = _refresh_names(refresh, context.queries)
         existing: Snapshot | None = None
+        chosen_label: str | None
         if out.exists():
             try:
                 existing = lockfile.load(out)
