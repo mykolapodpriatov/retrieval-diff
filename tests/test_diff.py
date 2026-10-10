@@ -19,6 +19,22 @@ from retrieval_diff.types import ChangeKind
 # --- change kinds -----------------------------------------------------------
 
 
+def test_a_result_rejects_a_repeated_hit_id() -> None:
+    """A duplicate id would collapse inside rank_of and hide a hit from the diff."""
+    from pydantic import ValidationError
+
+    from retrieval_diff.types import QueryResult, ScoredHit
+
+    with pytest.raises(ValidationError, match="duplicate hit id"):
+        QueryResult(
+            query="q",
+            hits=(
+                ScoredHit(id="a", score=0.9, rank=0),
+                ScoredHit(id="a", score=0.1, rank=1),
+            ),
+        )
+
+
 def test_diff_query_rejects_mismatched_queries() -> None:
     """diff_query guards against being handed two different queries."""
     from retrieval_diff.diff import diff_query

@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from retrieval_diff.fingerprint import ConfigFingerprint
 
@@ -46,6 +46,25 @@ class QueryResult(BaseModel):
 
     query: str
     hits: tuple[ScoredHit, ...]
+
+    @model_validator(mode="after")
+    def _unique_hit_ids(self) -> QueryResult:
+        """Reject a ranking that lists the same chunk twice.
+
+        ``rank_of`` and ``score_of`` are dicts, so a repeated id used to keep
+        only the later copy. The diff then reported one hit where the
+        retriever had returned two, and the churn of the dropped copy
+        disappeared. A top-K list with a duplicate id is a broken retriever,
+        and the lock should fail on it rather than store a quieter version.
+        """
+        seen: set[str] = set()
+        for hit in self.hits:
+            if hit.id in seen:
+                raise ValueError(
+                    f"duplicate hit id {hit.id!r} in query {self.query!r}"
+                )
+            seen.add(hit.id)
+        return self
 
     def ids(self) -> list[str]:
         """Return hit ids in rank order."""
