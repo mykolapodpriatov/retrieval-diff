@@ -60,9 +60,7 @@ class QueryResult(BaseModel):
         seen: set[str] = set()
         for hit in self.hits:
             if hit.id in seen:
-                raise ValueError(
-                    f"duplicate hit id {hit.id!r} in query {self.query!r}"
-                )
+                raise ValueError(f"duplicate hit id {hit.id!r} in query {self.query!r}")
             seen.add(hit.id)
         return self
 
