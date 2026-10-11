@@ -172,8 +172,12 @@ class BM25Retriever:
         self.corpus = corpus
         self._ids = corpus.ids()
         tokenized = [tokenize(text) for _, text in corpus.chunks]
-        # rank_bm25 requires a non-empty corpus; guard the empty case.
-        self._bm25: BM25Okapi | None = BM25Okapi(tokenized) if tokenized else None
+        # rank_bm25 divides by the average document length. An empty corpus,
+        # or one whose chunks tokenize to nothing ("???", "!!!"), has average
+        # length 0 and raises ZeroDivisionError in the constructor.
+        self._bm25: BM25Okapi | None = (
+            BM25Okapi(tokenized) if tokenized and any(tokenized) else None
+        )
 
     def raw_scores(self, query: str) -> dict[str, float]:
         """Return ``{id: bm25_score}`` for every chunk."""
